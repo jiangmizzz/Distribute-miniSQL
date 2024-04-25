@@ -6,7 +6,7 @@ import (
 )
 
 // 配置cors中间件（跨域）
-func CORSMiddleware() gin.HandlerFunc {
+func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -27,7 +27,7 @@ func SetupRouter() *gin.Engine {
 	r := gin.Default()
 
 	// 应用CORS中间件
-	r.Use(CORSMiddleware())
+	r.Use(corsMiddleware())
 
 	apiRoutes := r.Group("/api")
 	//配置路由
