@@ -2,21 +2,24 @@ package Master
 
 import (
 	"container/list"
-	"encoding/json"
 	"fmt"
 	"go.etcd.io/etcd/client/v3"
 	"log/slog"
+	"strconv"
 	"time"
 )
 
 const (
 	etcdEndpoints = "http://localhost:2379"
-	regionsPrefix = "/regions/" // etcd key prefix for new region server
+	serverPrefix  = "/server/" // etcd key prefix for new region server
+	regionPrefix  = "/region/" // etcd key prefix for new region
 )
 
 type Master struct {
 	etcdClient *clientv3.Client
-	regions    map[int]*list.List // 默认第一台设备为主设备
+	regions    []*list.List        // regionID -> list of region servers, the first one is the primary server
+	regionNum  int                 // number of regions
+	servers    map[string]struct{} // all region servers set
 }
 
 func (m *Master) Start() {
@@ -33,19 +36,11 @@ func (m *Master) Start() {
 	m.etcdClient = cli
 
 	// initialize member variables
-	m.regions = make(map[int]*list.List)
+	m.regions = make([]*list.List, 8)
+	m.servers = make(map[string]struct{})
 
 	// Watch for new region server
 	go m.watchRegionServer()
-}
-
-func decodeRegionServerInfo(data []byte) (map[string]interface{}, error) {
-	var info map[string]interface{}
-	err := json.Unmarshal(data, &info)
-	if err != nil {
-		return nil, err
-	}
-	return info, nil
 }
 
 func (m *Master) watchRegionServer() {
@@ -59,41 +54,60 @@ func (m *Master) watchRegionServer() {
 		}
 	}(watcher)
 
-	watchChan := watcher.Watch(m.etcdClient.Ctx(), regionsPrefix, clientv3.WithPrefix(), clientv3.WithPrevKV())
+	watchChan := watcher.Watch(m.etcdClient.Ctx(), serverPrefix, clientv3.WithPrefix(), clientv3.WithPrevKV())
 	for {
 		select {
 		case resp := <-watchChan:
 			for _, event := range resp.Events {
 				switch event.Type {
 				case clientv3.EventTypePut:
-					slog.Info(fmt.Sprintf("Region server up: %s", event.Kv.Key))
-					data, err := decodeRegionServerInfo(event.Kv.Value)
+					ip := string(event.Kv.Key[len(serverPrefix):])
+					regionID, err := strconv.Atoi(string(event.Kv.Value))
 					if err != nil {
-						slog.Error(fmt.Sprintf("Failed to decode region server info: %v", err))
+						slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
 						continue
 					}
-					ip := string(event.Kv.Key[len(regionsPrefix):])
-					regionID := int(data["region_id"].(float64)) // interface{} value type is float64
 
-					// TODO: 为空闲server分配region
+					// check if the server is already up
+					if _, ok := m.servers[ip]; ok {
+						continue
+					}
+					slog.Info(fmt.Sprintf("Region server up: %s", event.Kv.Key))
+					m.servers[ip] = struct{}{}
 
-					if _, ok := m.regions[regionID]; !ok {
+					// link the region server to the region list
+					if regionID >= len(m.regions) {
+						newRegions := make([]*list.List, max(regionID+1, 2*len(m.regions))) // double the size of regions
+						copy(newRegions, m.regions)
+						m.regions = newRegions
+					}
+					if m.regions[regionID] == nil { // the first server of the region
 						m.regions[regionID] = list.New()
+						// update the region info
+						_, err = m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID), ip)
+						if err != nil {
+							slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+						}
 					}
 					m.regions[regionID].PushBack(ip)
+					m.regionNum = max(m.regionNum, regionID)
 				case clientv3.EventTypeDelete:
-					slog.Info(fmt.Sprintf("Region server down: %s", event.Kv.Key))
-					data, err := decodeRegionServerInfo(event.PrevKv.Value)
+					ip := string(event.PrevKv.Key[len(serverPrefix):])
+					regionID, err := strconv.Atoi(string(event.PrevKv.Value))
 					if err != nil {
-						slog.Error(fmt.Sprintf("Failed to decode region server info: %v", err))
+						slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
 						continue
 					}
-					ip := string(event.PrevKv.Key[len(regionsPrefix):])
-					regionID := int(data["region_id"].(float64))
+
+					// check if the server is already down
+					if _, ok := m.servers[ip]; !ok {
+						continue
+					}
+					slog.Info(fmt.Sprintf("Region server down: %s", event.Kv.Key))
 
 					// TODO: 容错容灾 挂掉的设备应由多余设备进行补充
 
-					if _, ok := m.regions[regionID]; ok {
+					if m.regions[regionID] != nil {
 						for e := m.regions[regionID].Front(); e != nil; e = e.Next() {
 							if e.Value.(string) == ip {
 								m.regions[regionID].Remove(e)
@@ -101,10 +115,21 @@ func (m *Master) watchRegionServer() {
 							}
 						}
 						if m.regions[regionID].Len() == 0 {
-							delete(m.regions, regionID)
+							m.regions[regionID] = nil
+							// delete the region info
+							_, err = m.etcdClient.Delete(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID))
+							if err != nil {
+								slog.Error(fmt.Sprintf("Failed to delete region info: %v", err))
+							}
+						} else {
+							// update the region info
+							_, err = m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID), m.regions[regionID].Front().Value.(string))
+							if err != nil {
+								slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+							}
 						}
 					} else {
-						slog.Error(fmt.Sprintf("Region server not found: %d", regionID))
+						slog.Error(fmt.Sprintf("Region %d is empty", regionID))
 					}
 				}
 			}
