@@ -3,9 +3,13 @@ package main
 import (
 	"Region/database"
 	"Region/route"
+	"Region/server"
 )
 
 func main() {
+	//连接到etcd
+	var rs server.RegionServer
+	rs.ConnectToEtcd()
 	//连接数据库
 	database.InitDB()
 	//初始化路由
