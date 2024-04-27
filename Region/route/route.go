@@ -31,7 +31,9 @@ func SetupRouter() *gin.Engine {
 
 	apiRoutes := r.Group("/api")
 	//配置路由
-	apiRoutes.GET("/query/:sql", controller.QueryHandler)
+	apiRoutes.POST("/sql/read", controller.QueryHandler)
+	apiRoutes.POST("/sql/write", controller.WriteHandler)
+	apiRoutes.POST("/table/sync", controller.SyncHandler)
 	//其他路由...
 	return r
 }

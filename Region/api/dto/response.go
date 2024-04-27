@@ -5,6 +5,6 @@ package dto
 type ResponseType[T any] struct {
 	Success bool   `json:"success"`
 	Data    T      `json:"data"`
-	ErrCode int    `json:"errcode"`
-	ErrMsg  string `json:"errmsg"`
+	ErrCode string `json:"errCode"`
+	ErrMsg  string `json:"errMsg"`
 }

@@ -8,3 +8,8 @@ import (
 func QueryHandler(c *gin.Context) {
 
 }
+
+// sql写操作
+func WriteHandler(c *gin.Context) {
+
+}
