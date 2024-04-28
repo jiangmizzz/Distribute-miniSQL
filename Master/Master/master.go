@@ -76,21 +76,24 @@ func (m *Master) watchRegionServer() {
 					m.servers[ip] = struct{}{}
 
 					// link the region server to the region list
-					if regionID >= len(m.regions) {
-						newRegions := make([]*list.List, max(regionID+1, 2*len(m.regions))) // double the size of regions
+					if regionID >= len(m.regions) { // expand the regions list if necessary
+						newRegions := make([]*list.List, max(regionID+1, 2*len(m.regions)))
 						copy(newRegions, m.regions)
 						m.regions = newRegions
 					}
-					if m.regions[regionID] == nil { // the first server of the region
+					isMaster := false
+					if m.regions[regionID] == nil {
 						m.regions[regionID] = list.New()
-						// update the region info
-						_, err = m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID), ip)
-						if err != nil {
-							slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
-						}
+						isMaster = true
 					}
 					m.regions[regionID].PushBack(ip)
 					m.regionNum = max(m.regionNum, regionID)
+
+					// update the server info
+					_, err = m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.FormatBool(isMaster))
+					if err != nil {
+						slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+					}
 				case clientv3.EventTypeDelete:
 					ip := string(event.PrevKv.Key[len(serverPrefix):])
 					regionID, err := strconv.Atoi(string(event.PrevKv.Value))
@@ -110,26 +113,32 @@ func (m *Master) watchRegionServer() {
 					if m.regions[regionID] != nil {
 						for e := m.regions[regionID].Front(); e != nil; e = e.Next() {
 							if e.Value.(string) == ip {
+								if e == m.regions[regionID].Front() { // the master server is down
+									if e.Next() != nil {
+										// update the new master server
+										slog.Info(fmt.Sprintf("New master server of region %d: %s", regionID, e.Next().Value.(string)))
+										_, err = m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+e.Next().Value.(string), "true")
+										if err != nil {
+											slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+										}
+									}
+								}
 								m.regions[regionID].Remove(e)
 								break
 							}
 						}
+
 						if m.regions[regionID].Len() == 0 {
+							slog.Info(fmt.Sprintf("Region %d is removed", regionID))
 							m.regions[regionID] = nil
-							// delete the region info
-							_, err = m.etcdClient.Delete(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID))
-							if err != nil {
-								slog.Error(fmt.Sprintf("Failed to delete region info: %v", err))
-							}
-						} else {
-							// update the region info
-							_, err = m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID), m.regions[regionID].Front().Value.(string))
-							if err != nil {
-								slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
-							}
+						}
+						// delete the server info
+						_, err = m.etcdClient.Delete(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip)
+						if err != nil {
+							slog.Error(fmt.Sprintf("Failed to delete region info: %v", err))
 						}
 					} else {
-						slog.Error(fmt.Sprintf("Region %d is empty", regionID))
+						slog.Error(fmt.Sprintf("Region %d is not found", regionID))
 					}
 				}
 			}
