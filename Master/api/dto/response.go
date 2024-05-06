@@ -9,7 +9,11 @@ type ResponseType[T any] struct {
 	ErrMsg  string `json:"errMsg"`
 }
 
-type Tables struct {
+type QueryTableResponse struct {
 	Name string
 	IP   string
+}
+
+type IPResponse struct {
+	IP string
 }

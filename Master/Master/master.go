@@ -11,8 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.etcd.io/etcd/client/v3"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,20 +23,25 @@ const (
 	serverPrefix  = "/server/" // etcd key prefix for new region server
 	regionPrefix  = "/region/" // etcd key prefix for new region
 	tablePrefix   = "/table/"
+
+	regionServerNum = 3 // the number of region servers in a region
+	backupServerNum = 2 // the number of idle servers for backup
+	firstRegionNum  = 2 // the number of the first region
 )
 
 type Master struct {
 	controller Controller.Controller
 	server     *http.Server
 	etcdClient *clientv3.Client
-	regions    []*list.List        // regionID -> list of region servers, the first one is the primary server
-	regionNum  int                 // number of regions
+	regions    map[int]*list.List  // regionID -> list of region servers, the first one is the primary server
 	servers    map[string]struct{} // all region servers set
+	tables     map[string]int      // table name -> region ID
+	tableNum   map[int]int         // region ID -> table number
 }
 
 func (m *Master) Start() {
 	slog.Info("Starting master...")
-	// Connect to etcd
+	// connect to etcd
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   []string{etcdEndpoints},
 		DialTimeout: 5 * time.Second,
@@ -47,13 +54,17 @@ func (m *Master) Start() {
 
 	// initialize member variables
 	m.controller = Controller.Controller{Service: m}
-	m.regions = make([]*list.List, 8)
+	m.regions = make(map[int]*list.List)
 	m.servers = make(map[string]struct{})
+	m.tables = make(map[string]int)
+	m.tableNum = make(map[int]int)
 
-	// Watch for new region server
+	// watch for new region server
 	go m.watchRegionServer()
+	// watch for new table
+	go m.watchTable()
 
-	// Start the server
+	// start the backend server
 	router := m.setupRouter()
 	m.server = &http.Server{
 		Addr:    ":8080",
@@ -65,30 +76,65 @@ func (m *Master) Start() {
 		}
 	}()
 
-	// Get the region already in etcd
-	resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), regionPrefix, clientv3.WithPrefix())
+	// get the server already in etcd
+	m.getInitInfoFromEtcd()
+}
+
+func (m *Master) setupRouter() *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
+
+	r := gin.Default()
+
+	r.Use(Route.CorsMiddleware())
+
+	apiRoutes := r.Group("/api")
+	apiRoutes.POST("/table/query", m.controller.QueryTable)
+	apiRoutes.GET("/table/new", m.controller.NewTable)
+	return r
+}
+
+func (m *Master) getInitInfoFromEtcd() {
+	// get the server already in etcd
+	resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), serverPrefix, clientv3.WithPrefix())
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to get server info: %v", err))
+		return
+	}
+	for _, kv := range resp.Kvs {
+		ip := string(kv.Key[len(serverPrefix):])
+		regionID, err := strconv.Atoi(string(kv.Value))
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
+			continue
+		}
+		m.serverUp(ip, regionID, false)
+	}
+
+	// correct the region info(master/slave)
+	resp, err = m.etcdClient.Get(m.etcdClient.Ctx(), regionPrefix, clientv3.WithPrefix())
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to get region info: %v", err))
 		return
 	}
 	for _, kv := range resp.Kvs {
-		key := string(kv.Key)
-		value := string(kv.Value)
-		regionID, err := strconv.Atoi(key[len(regionPrefix) : len(regionPrefix)+1])
+		parts := strings.Split(string(kv.Key[len(regionPrefix):]), "/")
+		if len(parts) != 2 {
+			slog.Error(fmt.Sprintf("Invalid region info: %s", string(kv.Key)))
+			continue
+		}
+		regionID, err := strconv.Atoi(parts[0])
 		if err != nil {
 			slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
 			continue
 		}
-		ip := key[len(regionPrefix)+2:]
-		isMaster, err := strconv.ParseBool(value)
+		ip := parts[1]
+
+		isMaster, err := strconv.ParseBool(string(kv.Value))
 		if err != nil {
-			slog.Error(fmt.Sprintf("Failed to convert isMaster: %v", err))
+			slog.Error(fmt.Sprintf("Failed to convert master info: %v", err))
 			continue
 		}
-		m.serverUp(ip, regionID)
 		if isMaster {
-			slog.Info(fmt.Sprintf("Master server of region %d: %s", regionID, ip))
-			// move the master server to the front
 			for e := m.regions[regionID].Front(); e != nil; e = e.Next() {
 				if e.Value.(string) == ip {
 					m.regions[regionID].MoveToFront(e)
@@ -97,18 +143,23 @@ func (m *Master) Start() {
 			}
 		}
 	}
-}
 
-func (m *Master) setupRouter() *gin.Engine {
-	//gin.SetMode(gin.ReleaseMode)
-
-	r := gin.Default()
-
-	r.Use(Route.CorsMiddleware())
-
-	apiRoutes := r.Group("/api")
-	apiRoutes.POST("/table/query", m.controller.QueryTable)
-	return r
+	// get the table already in etcd
+	resp, err = m.etcdClient.Get(m.etcdClient.Ctx(), tablePrefix, clientv3.WithPrefix())
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to get table info: %v", err))
+		return
+	}
+	for _, kv := range resp.Kvs {
+		tableName := string(kv.Key[len(tablePrefix):])
+		regionID, err := strconv.Atoi(string(kv.Value))
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
+			continue
+		}
+		m.tables[tableName] = regionID
+		m.tableNum[regionID]++
+	}
 }
 
 func (m *Master) watchRegionServer() {
@@ -135,7 +186,7 @@ func (m *Master) watchRegionServer() {
 						slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
 						continue
 					}
-					m.serverUp(ip, regionID)
+					m.serverUp(ip, regionID, true)
 				case clientv3.EventTypeDelete:
 					ip := string(event.PrevKv.Key[len(serverPrefix):])
 					regionID, err := strconv.Atoi(string(event.PrevKv.Value))
@@ -150,7 +201,8 @@ func (m *Master) watchRegionServer() {
 	}
 }
 
-func (m *Master) serverUp(ip string, regionID int) {
+// isNew is false if the server is already up when the master starts
+func (m *Master) serverUp(ip string, regionID int, isNew bool) {
 	// check if the server is already up
 	if _, ok := m.servers[ip]; ok {
 		return
@@ -159,23 +211,44 @@ func (m *Master) serverUp(ip string, regionID int) {
 	m.servers[ip] = struct{}{}
 
 	// link the region server to the region list
-	if regionID >= len(m.regions) { // expand the regions list if necessary
-		newRegions := make([]*list.List, max(regionID+1, 2*len(m.regions)))
-		copy(newRegions, m.regions)
-		m.regions = newRegions
-	}
 	isMaster := false
 	if m.regions[regionID] == nil {
 		m.regions[regionID] = list.New()
 		isMaster = true
 	}
 	m.regions[regionID].PushBack(ip)
-	m.regionNum = max(m.regionNum, regionID)
+	if _, ok := m.tableNum[regionID]; !ok && regionID != 0 {
+		m.tableNum[regionID] = 0
+	}
 
-	// update the server info
-	_, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.FormatBool(isMaster))
-	if err != nil {
-		slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+	if isNew {
+		// update the server info if the server in a region
+		if regionID != 0 {
+			_, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.FormatBool(isMaster))
+			if err != nil {
+				slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+			}
+			// update metadata
+		} else {
+			// update the server info if the server is idle and there is a region not full
+			for id, region := range m.regions {
+				if id != 0 && region.Len() < regionServerNum {
+					// update etcd
+					_, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(id)+"/"+ip, strconv.FormatBool(false))
+					if err != nil {
+						slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+					}
+					_, err = m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+ip, strconv.Itoa(id))
+					if err != nil {
+						slog.Error(fmt.Sprintf("Failed to update server info: %v", err))
+					}
+					// update the region list
+					region.PushBack(ip)
+					slog.Info(fmt.Sprintf("Region server %s is assigned to region %d", ip, id))
+					break
+				}
+			}
+		}
 	}
 }
 
@@ -200,7 +273,9 @@ func (m *Master) serverDown(ip string, regionID int) {
 						}
 					}
 				}
+				// remove the server from the metadata
 				m.regions[regionID].Remove(e)
+				delete(m.servers, ip)
 				break
 			}
 		}
@@ -218,8 +293,88 @@ func (m *Master) serverDown(ip string, regionID int) {
 	}
 }
 
-func (m *Master) QueryTable(tableNames []string) ([]dto.Tables, error) {
-	var tables []dto.Tables
+func (m *Master) watchTable() {
+	slog.Info("Watching for new table...")
+	watcher := clientv3.NewWatcher(m.etcdClient)
+	defer func(watcher clientv3.Watcher) {
+		err := watcher.Close()
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to close etcd watcher: %v", err))
+			return
+		}
+	}(watcher)
+
+	watchChan := watcher.Watch(m.etcdClient.Ctx(), tablePrefix, clientv3.WithPrefix(), clientv3.WithPrevKV())
+	for {
+		select {
+		case resp := <-watchChan:
+			for _, event := range resp.Events {
+				switch event.Type {
+				case clientv3.EventTypePut:
+					tableName := string(event.Kv.Key[len(tablePrefix):])
+					regionID, err := strconv.Atoi(string(event.Kv.Value))
+					if err != nil {
+						slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
+						continue
+					}
+					m.tableCreate(tableName, regionID)
+				case clientv3.EventTypeDelete:
+					tableName := string(event.PrevKv.Key[len(tablePrefix):])
+					m.tableDelete(tableName)
+				}
+			}
+		}
+	}
+}
+
+func (m *Master) tableCreate(tableName string, regionID int) {
+	if _, ok := m.tables[tableName]; !ok {
+		slog.Info(fmt.Sprintf("Table %s is created in region %d", tableName, regionID))
+		m.tableNum[regionID]++
+	} else {
+		slog.Info(fmt.Sprintf("Table %s is moved to region %d", tableName, regionID))
+	}
+	m.tables[tableName] = regionID
+}
+
+func (m *Master) tableDelete(tableName string) {
+	if regionID, ok := m.tables[tableName]; ok {
+		slog.Info(fmt.Sprintf("Table %s is removed from region %d", tableName, regionID))
+		m.tableNum[regionID]--
+		delete(m.tables, tableName)
+		// if the region is empty, remove it
+		if m.tableNum[regionID] == 0 {
+			// delete the region info
+			if _, err := m.etcdClient.Delete(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID), clientv3.WithPrefix()); err != nil {
+				slog.Error(fmt.Sprintf("Failed to delete region info: %v", err))
+			}
+
+			// check if the region is existed
+			if regionID == 0 {
+				slog.Warn("Region 0 is not valid")
+				return
+			}
+			if _, ok := m.regions[regionID]; !ok {
+				slog.Warn(fmt.Sprintf("Region %d is not found", regionID))
+				return
+			}
+			// update the server info
+			for e := m.regions[regionID].Front(); e != nil; e = e.Next() {
+				if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+e.Value.(string), "0"); err != nil {
+					slog.Error(fmt.Sprintf("Failed to update server info: %v", err))
+				}
+				m.regions[0].PushBack(e.Value)
+			}
+			delete(m.regions, regionID)
+			delete(m.tableNum, regionID)
+		}
+	} else {
+		slog.Warn(fmt.Sprintf("Table %s is not found", tableName))
+	}
+}
+
+func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, error) {
+	var tables []dto.QueryTableResponse
 	for _, tableName := range tableNames {
 		// Get the region stored the table
 		resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), tablePrefix+tableName)
@@ -227,20 +382,107 @@ func (m *Master) QueryTable(tableNames []string) ([]dto.Tables, error) {
 			slog.Error(fmt.Sprintf("Failed to get table info: %v", err))
 			return nil, err
 		}
+		tables = append(tables, dto.QueryTableResponse{
+			Name: tableName,
+			IP:   "",
+		})
+
+		// Get the master server of the region if exist
 		if resp.Count == 0 {
 			slog.Warn(fmt.Sprintf("Table %s is not found.", tableName))
-			tables = append(tables, dto.Tables{
-				Name: tableName,
-				IP:   "",
-			})
-		} else {
-			tables = append(tables, dto.Tables{
-				Name: tableName,
-				IP:   string(resp.Kvs[0].Value),
-			})
+			continue
 		}
+		regionID := int(resp.Kvs[0].Value[0])
+		if m.regions[regionID] == nil || m.regions[regionID].Len() == 0 {
+			slog.Warn(fmt.Sprintf("Region %d is not found.", regionID))
+			continue
+		}
+		tables[len(tables)-1].IP = m.regions[regionID].Front().Value.(string)
 	}
 	return tables, nil
+}
+
+func (m *Master) NewTable(tableName string) (string, error) {
+	// Check if the table is already exist
+	resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), tablePrefix+tableName)
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to get table info: %v", err))
+		return "", err
+	}
+	if resp.Count != 0 {
+		slog.Warn(fmt.Sprintf("Table %s is already exist.", tableName))
+		return "", errors.New("table already exist")
+	}
+
+	// Find the region to store the table
+	regionID := 0
+	// find if there is a region with no table
+	for id, num := range m.tableNum {
+		if num == 0 {
+			regionID = id
+			break
+		}
+	}
+	// if there is no region with no table
+	if regionID == 0 {
+		// If there are enough idle region servers
+		if m.regions[0] != nil && m.regions[0].Len() >= backupServerNum+regionServerNum {
+			regionID = m.createNewRegion()
+		} else {
+			// Find the region with the least tables
+			minTableNum := math.MaxInt32
+			for id, num := range m.tableNum {
+				if num < minTableNum {
+					minTableNum = num
+					regionID = id
+				}
+			}
+		}
+		// If there is still no region
+		if regionID == 0 {
+			if m.regions[0] != nil && m.regions[0].Len() >= firstRegionNum {
+				regionID = m.createNewRegion()
+			} else {
+				return "", errors.New("no enough region servers")
+			}
+		}
+	}
+
+	return m.regions[regionID].Front().Value.(string), nil
+}
+
+func (m *Master) createNewRegion() int {
+	// Get the new region servers
+	var newRegionServers []string
+	for i := 0; i < min(regionServerNum, len(m.servers)); i++ {
+		newRegionServers = append(newRegionServers, m.regions[0].Front().Value.(string))
+		m.regions[0].Remove(m.regions[0].Front())
+	}
+
+	// Create a new region
+	// Find the first empty region
+	regionID := 1
+	for ; regionID <= len(m.regions); regionID++ {
+		if m.regions[regionID] == nil {
+			break
+		}
+	}
+	// Link the new region servers to the new region
+	m.regions[regionID] = list.New()
+	for i, ip := range newRegionServers {
+		m.regions[regionID].PushBack(ip)
+		if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.FormatBool(i == 0)); err != nil {
+			slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+		}
+	}
+	for _, ip := range newRegionServers {
+		if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+ip, strconv.Itoa(regionID)); err != nil {
+			slog.Error(fmt.Sprintf("Failed to update server info: %v", err))
+		}
+	}
+	m.tableNum[regionID] = 0
+	slog.Info(fmt.Sprintf("New region %d is created: %v", regionID, newRegionServers))
+	return regionID
 }
 
 func (m *Master) Stop() {
