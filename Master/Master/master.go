@@ -24,9 +24,9 @@ const (
 	regionPrefix  = "/region/" // etcd key prefix for new region
 	tablePrefix   = "/table/"
 
-	regionServerNum = 3 // the number of region servers in a region
-	backupServerNum = 2 // the number of idle servers for backup
-	firstRegionNum  = 2 // the number of the first region
+	regionServerNum    = 3 // the number of region servers in a region
+	backupServerNum    = 2 // the number of idle servers for backup
+	regionMinServerNum = 2 // the minimum number of region servers in a region (first region)
 )
 
 type Master struct {
@@ -157,8 +157,7 @@ func (m *Master) getInitInfoFromEtcd() {
 			slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
 			continue
 		}
-		m.tables[tableName] = regionID
-		m.tableNum[regionID]++
+		m.tableCreate(tableName, regionID)
 	}
 }
 
@@ -221,33 +220,11 @@ func (m *Master) serverUp(ip string, regionID int, isNew bool) {
 		m.tableNum[regionID] = 0
 	}
 
-	if isNew {
+	if isNew && regionID != 0 {
 		// update the server info if the server in a region
-		if regionID != 0 {
-			_, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.FormatBool(isMaster))
-			if err != nil {
-				slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
-			}
-			// update metadata
-		} else {
-			// update the server info if the server is idle and there is a region not full
-			for id, region := range m.regions {
-				if id != 0 && region.Len() < regionServerNum {
-					// update etcd
-					_, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(id)+"/"+ip, strconv.FormatBool(false))
-					if err != nil {
-						slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
-					}
-					_, err = m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+ip, strconv.Itoa(id))
-					if err != nil {
-						slog.Error(fmt.Sprintf("Failed to update server info: %v", err))
-					}
-					// update the region list
-					region.PushBack(ip)
-					slog.Info(fmt.Sprintf("Region server %s is assigned to region %d", ip, id))
-					break
-				}
-			}
+		_, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.FormatBool(isMaster))
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
 		}
 	}
 }
@@ -258,8 +235,6 @@ func (m *Master) serverDown(ip string, regionID int) {
 		return
 	}
 	slog.Info(fmt.Sprintf("Region server down: %s", ip))
-
-	// TODO: 容错容灾 挂掉的设备应由多余设备进行补充
 
 	if m.regions[regionID] != nil {
 		for e := m.regions[regionID].Front(); e != nil; e = e.Next() {
@@ -287,6 +262,22 @@ func (m *Master) serverDown(ip string, regionID int) {
 		// delete the server info
 		if _, err := m.etcdClient.Delete(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip); err != nil {
 			slog.Error(fmt.Sprintf("Failed to delete region info: %v", err))
+		}
+
+		// try to get an idle server to replace the down server if necessary
+		if regionID != 0 && m.regions[regionID] != nil && m.regions[regionID].Len() < regionServerNum && m.regions[0] != nil && m.regions[0].Len() > 0 {
+			newServer := m.regions[0].Front().Value.(string)
+			m.regions[0].Remove(m.regions[0].Front())
+			// update the server info
+			if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+newServer, strconv.Itoa(regionID)); err != nil {
+				slog.Error(fmt.Sprintf("Failed to update server info: %v", err))
+			}
+			// update the region info
+			if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+newServer, "false"); err != nil {
+				slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+			}
+			m.regions[regionID].PushBack(newServer)
+			slog.Info(fmt.Sprintf("Region server %s is assigned to region %d", newServer, regionID))
 		}
 	} else {
 		slog.Error(fmt.Sprintf("Region %d is not found", regionID))
@@ -393,8 +384,7 @@ func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, erro
 			continue
 		}
 		regionID := int(resp.Kvs[0].Value[0])
-		if m.regions[regionID] == nil || m.regions[regionID].Len() == 0 {
-			slog.Warn(fmt.Sprintf("Region %d is not found.", regionID))
+		if !m.checkRegionSafety(regionID) {
 			continue
 		}
 		tables[len(tables)-1].IP = m.regions[regionID].Front().Value.(string)
@@ -440,14 +430,16 @@ func (m *Master) NewTable(tableName string) (string, error) {
 		}
 		// If there is still no region
 		if regionID == 0 {
-			if m.regions[0] != nil && m.regions[0].Len() >= firstRegionNum {
+			if m.regions[0] != nil && m.regions[0].Len() >= regionMinServerNum {
 				regionID = m.createNewRegion()
 			} else {
 				return "", errors.New("no enough region servers")
 			}
 		}
 	}
-
+	if !m.checkRegionSafety(regionID) {
+		return "", errors.New("no enough region servers")
+	}
 	return m.regions[regionID].Front().Value.(string), nil
 }
 
@@ -483,6 +475,38 @@ func (m *Master) createNewRegion() int {
 	m.tableNum[regionID] = 0
 	slog.Info(fmt.Sprintf("New region %d is created: %v", regionID, newRegionServers))
 	return regionID
+}
+
+// ensure the region has at least `regionMinServerNum` servers
+func (m *Master) checkRegionSafety(regionID int) bool {
+	if m.regions[regionID] == nil || m.regions[regionID].Len() == 0 {
+		slog.Error(fmt.Sprintf("Region %d is not found", regionID))
+		return false
+	}
+
+	for m.regions[regionID].Len() < regionMinServerNum {
+		// try to assign idle servers to the region
+		if m.regions[0] != nil && m.regions[0].Len() > 0 {
+			newServer := m.regions[0].Front().Value.(string)
+			m.regions[0].Remove(m.regions[0].Front())
+			// update the server info
+			if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+newServer, strconv.Itoa(regionID)); err != nil {
+				slog.Error(fmt.Sprintf("Failed to update server info: %v", err))
+				return false
+			}
+			// update the region info
+			if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+newServer, "false"); err != nil {
+				slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+				return false
+			}
+			m.regions[regionID].PushBack(newServer)
+			slog.Info(fmt.Sprintf("Region server %s is assigned to region %d", newServer, regionID))
+		} else {
+			slog.Warn(fmt.Sprintf("Region %d has no enough servers", regionID))
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Master) Stop() {
