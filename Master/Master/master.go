@@ -90,6 +90,7 @@ func (m *Master) setupRouter() *gin.Engine {
 	apiRoutes := r.Group("/api")
 	apiRoutes.POST("/table/query", m.controller.QueryTable)
 	apiRoutes.GET("/table/new", m.controller.NewTable)
+	apiRoutes.GET("/table/delete", m.controller.DeleteTable)
 	return r
 }
 
@@ -367,7 +368,7 @@ func (m *Master) tableDelete(tableName string) {
 func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, error) {
 	var tables []dto.QueryTableResponse
 	for _, tableName := range tableNames {
-		// Get the region stored the table
+		// get the region stored the table
 		resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), tablePrefix+tableName)
 		if err != nil {
 			slog.Error(fmt.Sprintf("Failed to get table info: %v", err))
@@ -378,7 +379,7 @@ func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, erro
 			IP:   "",
 		})
 
-		// Get the master server of the region if exist
+		// get the master server of the region if exist
 		if resp.Count == 0 {
 			slog.Warn(fmt.Sprintf("Table %s is not found.", tableName))
 			continue
@@ -393,18 +394,13 @@ func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, erro
 }
 
 func (m *Master) NewTable(tableName string) (string, error) {
-	// Check if the table is already exist
-	resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), tablePrefix+tableName)
-	if err != nil {
-		slog.Error(fmt.Sprintf("Failed to get table info: %v", err))
-		return "", err
-	}
-	if resp.Count != 0 {
+	// check if the table is already exist
+	if _, ok := m.tables[tableName]; ok {
 		slog.Warn(fmt.Sprintf("Table %s is already exist.", tableName))
 		return "", errors.New("table already exist")
 	}
 
-	// Find the region to store the table
+	// find the region to store the table
 	regionID := 0
 	// find if there is a region with no table
 	for id, num := range m.tableNum {
@@ -415,11 +411,11 @@ func (m *Master) NewTable(tableName string) (string, error) {
 	}
 	// if there is no region with no table
 	if regionID == 0 {
-		// If there are enough idle region servers
+		// if there are enough idle region servers
 		if m.regions[0] != nil && m.regions[0].Len() >= backupServerNum+regionServerNum {
 			regionID = m.createNewRegion()
 		} else {
-			// Find the region with the least tables
+			// find the region with the least tables
 			minTableNum := math.MaxInt32
 			for id, num := range m.tableNum {
 				if num < minTableNum {
@@ -428,7 +424,7 @@ func (m *Master) NewTable(tableName string) (string, error) {
 				}
 			}
 		}
-		// If there is still no region
+		// if there is still no region
 		if regionID == 0 {
 			if m.regions[0] != nil && m.regions[0].Len() >= regionMinServerNum {
 				regionID = m.createNewRegion()
@@ -475,6 +471,21 @@ func (m *Master) createNewRegion() int {
 	m.tableNum[regionID] = 0
 	slog.Info(fmt.Sprintf("New region %d is created: %v", regionID, newRegionServers))
 	return regionID
+}
+
+func (m *Master) DeleteTable(tableName string) (string, error) {
+	// check if the table exists
+	if _, ok := m.tables[tableName]; !ok {
+		slog.Warn(fmt.Sprintf("Table %s is not exist.", tableName))
+		return "", errors.New("table not exist")
+	}
+
+	// get the region stored the table
+	regionID := m.tables[tableName]
+	if !m.checkRegionSafety(regionID) {
+		return "", errors.New("no enough region servers")
+	}
+	return m.regions[regionID].Front().Value.(string), nil
 }
 
 // ensure the region has at least `regionMinServerNum` servers
