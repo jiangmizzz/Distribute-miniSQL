@@ -10,10 +10,14 @@ type ResponseType[T any] struct {
 }
 
 type QueryTableResponse struct {
-	Name string
-	IP   string
+	Name string `json:"name"`
+	IP   string `json:"ip"`
 }
 
 type IPResponse struct {
-	IP string
+	IP string `json:"ip"`
+}
+
+type ShowTableResponse struct {
+	TableNames []string `json:"tableNames"`
 }
