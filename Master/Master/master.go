@@ -23,20 +23,26 @@ const (
 	serverPrefix  = "/server/" // etcd key prefix for new region server
 	regionPrefix  = "/region/" // etcd key prefix for new region
 	tablePrefix   = "/table/"
+	visitPrefix   = "/visit/"
 
-	regionServerNum    = 3 // the number of region servers in a region
-	backupServerNum    = 2 // the number of idle servers for backup
-	regionMinServerNum = 2 // the minimum number of region servers in a region (first region)
+	regionServerNum      = 3   // the number of region servers in a region
+	backupServerNum      = 2   // the number of idle servers for backup
+	regionMinServerNum   = 2   // the minimum number of region servers in a region (first region)
+	loadBalanceCycle     = 5   // the cycle of load balance (minutes)
+	migrateThresholdHigh = 1.2 // if a region has more than 20% of the average visit times, it is considered as a hot region
+	migrateThresholdLow  = 0.8 // if a region has less than 20% of the average visit times, it is considered as a cold region
 )
 
 type Master struct {
 	controller Controller.Controller
 	server     *http.Server
 	etcdClient *clientv3.Client
-	regions    map[int][]string    // regionID -> array of region servers, the first one is the primary server
-	servers    map[string]struct{} // all region servers set
-	tables     map[string]int      // table name -> region ID
-	tableNum   map[int]int         // region ID -> table number
+	ticker     *time.Ticker
+	regions    map[int][]string       // regionID -> array of region servers, the first one is the primary server
+	servers    map[string]struct{}    // all region servers set
+	tables     map[string]int         // table name -> region ID
+	tableNum   map[int]int            // region ID -> table number
+	visitNum   map[int]map[string]int // region ID -> table name -> visit times
 }
 
 func (m *Master) Start() {
@@ -78,6 +84,14 @@ func (m *Master) Start() {
 
 	// get the server already in etcd
 	m.getInitInfoFromEtcd()
+
+	// set ticker to get the visit times of each table
+	m.ticker = time.NewTicker(loadBalanceCycle * time.Minute)
+	go func() {
+		for range m.ticker.C {
+			m.getVisitTimes()
+		}
+	}()
 }
 
 func (m *Master) setupRouter() *gin.Engine {
@@ -389,6 +403,81 @@ func (m *Master) tableDelete(tableName string) {
 	}
 }
 
+func (m *Master) getVisitTimes() {
+	slog.Info("Getting visit times of each table...")
+	m.visitNum = make(map[int]map[string]int)
+	regionVisitNum := make(map[int]int)
+	resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), visitPrefix, clientv3.WithPrefix())
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to get visit info: %v", err))
+		return
+	}
+
+	// get the visit times of each table in each region from etcd
+	for _, kv := range resp.Kvs {
+		tableName := string(kv.Key[len(visitPrefix):])
+		times, err := strconv.Atoi(string(kv.Value))
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to convert visit times: %v", err))
+			continue
+		}
+
+		regionID := m.tables[tableName]
+		if m.visitNum[regionID] == nil {
+			m.visitNum[regionID] = make(map[string]int)
+		}
+		m.visitNum[regionID][tableName] = times
+		regionVisitNum[regionID] += times
+	}
+	if len(regionVisitNum) == 0 {
+		slog.Warn("No visit times found")
+		return
+	}
+
+	minRegionID := 0
+	maxRegionID := 0
+	minVisitNum := math.MaxInt32
+	maxVisitNum := 0
+	visitAverage := 0.0
+	for regionID, num := range regionVisitNum {
+		visitAverage += float64(num)
+		if num < minVisitNum {
+			minVisitNum = num
+			minRegionID = regionID
+		}
+		if num > maxVisitNum {
+			maxVisitNum = num
+			maxRegionID = regionID
+		}
+	}
+	visitAverage /= float64(len(regionVisitNum))
+
+	// migrate the tables from the hot region to the cold region
+	if maxVisitNum > int(visitAverage*migrateThresholdHigh) && minVisitNum < int(visitAverage*migrateThresholdLow) {
+		slog.Info(fmt.Sprintf("Region %d is hotest with %d visit times, region %d is coldest with %d visit times, average visit times: %f",
+			maxRegionID, maxVisitNum, minRegionID, minVisitNum, visitAverage))
+		// find an optimal table to migrate
+		curDiff := regionVisitNum[maxRegionID] - regionVisitNum[minRegionID]
+		tableName := ""
+		minDiff := curDiff
+		for name, times := range m.visitNum[maxRegionID] {
+			if diff := int(math.Abs(float64(curDiff - times*2))); diff < minDiff {
+				tableName = name
+				minDiff = diff
+			}
+		}
+		if tableName == "" {
+			slog.Info("No table will be migrated because migrate any table will make the distribution worse")
+			return
+		}
+		// migrate the table
+		slog.Info(fmt.Sprintf("Migrate table %s with %d visit times from region %d to region %d", tableName, m.visitNum[maxRegionID][tableName], maxRegionID, minRegionID))
+		// TODO: Make a request to the region server to migrate the table
+	} else {
+		slog.Info(fmt.Sprintf("Current distribution is balanced, average visit times: %f", visitAverage))
+	}
+}
+
 func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, error) {
 	var tables []dto.QueryTableResponse
 	for _, tableName := range tableNames {
@@ -573,13 +662,16 @@ func (m *Master) ShowTable() ([]string, error) {
 
 func (m *Master) Stop() {
 	slog.Info("Stopping master...")
-	// Close the etcd client
+	// shutdown the ticker
+	m.ticker.Stop()
+
+	// close the etcd client
 	if err := m.etcdClient.Close(); err != nil {
 		slog.Error(fmt.Sprintf("Failed to close etcd client: %v", err))
 		return
 	}
 
-	// Shutdown the server
+	// shutdown the server
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := m.server.Shutdown(ctx); err != nil {
