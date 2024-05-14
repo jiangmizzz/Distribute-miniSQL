@@ -8,14 +8,14 @@ import (
 
 func main() {
 	//连接到etcd
-	var rs server.RegionServer
-	rs.ConnectToEtcd()
-	//连接数据库
-	database.InitDB()
+	server.Rs.ConnectToEtcd()
+
+	//连接数据库,并初始化全局Mysql对象
+	database.Mysql = database.InitDB()
 	//初始化路由
 	r := route.SetupRouter()
 	//默认监听在 8080 端口
-	err := r.Run("0.0.0.0:8080")
+	err := r.Run("0.0.0.0:8081")
 	if err != nil {
 		return
 	}
