@@ -5,10 +5,12 @@ import (
 	"Master/api/dto"
 	"Master/route"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"go.etcd.io/etcd/client/v3"
+	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -19,11 +21,14 @@ import (
 )
 
 const (
-	etcdEndpoints = "http://localhost:2379"
-	serverPrefix  = "/server/" // etcd key prefix for new region server
-	regionPrefix  = "/region/" // etcd key prefix for new region
-	tablePrefix   = "/table/"
-	visitPrefix   = "/visit/"
+	etcdEndpoints  = "http://localhost:2379"
+	discoverPrefix = "/server/discovery/"
+	serverPrefix   = "/server/" // etcd key prefix for new region server
+	regionPrefix   = "/region/" // etcd key prefix for new region
+	tablePrefix    = "/table/"
+	visitPrefix    = "/visit/"
+
+	movePath = "/table/move"
 
 	regionServerNum      = 3   // the number of region servers in a region
 	backupServerNum      = 2   // the number of idle servers for backup
@@ -34,15 +39,16 @@ const (
 )
 
 type Master struct {
-	controller Controller.Controller
-	server     *http.Server
-	etcdClient *clientv3.Client
-	ticker     *time.Ticker
-	regions    map[int][]string       // regionID -> array of region servers, the first one is the primary server
-	servers    map[string]struct{}    // all region servers set
-	tables     map[string]int         // table name -> region ID
-	tableNum   map[int]int            // region ID -> table number
-	visitNum   map[int]map[string]int // region ID -> table name -> visit times
+	controller     Controller.Controller
+	server         *http.Server
+	etcdClient     *clientv3.Client
+	ticker         *time.Ticker
+	regions        map[int][]string       // regionID -> array of region servers, the first one is the primary server
+	servers        map[string]struct{}    // all region servers set
+	tables         map[string]int         // table name -> region ID
+	tableNum       map[int]int            // region ID -> table number
+	visitNum       map[int]map[string]int // region ID -> table name -> visit times
+	regionVisitNum map[int]int            // region ID -> total visit times
 }
 
 func (m *Master) Start() {
@@ -64,6 +70,8 @@ func (m *Master) Start() {
 	m.servers = make(map[string]struct{})
 	m.tables = make(map[string]int)
 	m.tableNum = make(map[int]int)
+	m.visitNum = make(map[int]map[string]int)
+	m.regionVisitNum = make(map[int]int)
 
 	// watch for new region server
 	go m.watchRegionServer()
@@ -142,6 +150,8 @@ func (m *Master) getInitInfoFromEtcd() {
 	}
 
 	// get the server already in etcd
+	// get modified server's regionID first
+	serverRegion := make(map[string]int)
 	resp, err = m.etcdClient.Get(m.etcdClient.Ctx(), serverPrefix, clientv3.WithPrefix())
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to get server info: %v", err))
@@ -153,6 +163,24 @@ func (m *Master) getInitInfoFromEtcd() {
 		if err != nil {
 			slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
 			continue
+		}
+		serverRegion[ip] = regionID
+	}
+	// then get all discovered server info
+	resp, err = m.etcdClient.Get(m.etcdClient.Ctx(), discoverPrefix, clientv3.WithPrefix())
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to get discovered server info: %v", err))
+		return
+	}
+	for _, kv := range resp.Kvs {
+		ip := string(kv.Key[len(discoverPrefix):])
+		regionID, err := strconv.Atoi(string(kv.Value))
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
+			continue
+		}
+		if id, ok := serverRegion[ip]; ok {
+			regionID = id
 		}
 		index := -1
 		if i, ok := serverIndex[regionID][ip]; ok {
@@ -189,14 +217,14 @@ func (m *Master) watchRegionServer() {
 		}
 	}(watcher)
 
-	watchChan := watcher.Watch(m.etcdClient.Ctx(), serverPrefix, clientv3.WithPrefix(), clientv3.WithPrevKV())
+	watchChan := watcher.Watch(m.etcdClient.Ctx(), discoverPrefix, clientv3.WithPrefix(), clientv3.WithPrevKV())
 	for {
 		select {
 		case resp := <-watchChan:
 			for _, event := range resp.Events {
 				switch event.Type {
 				case clientv3.EventTypePut:
-					ip := string(event.Kv.Key[len(serverPrefix):])
+					ip := string(event.Kv.Key[len(discoverPrefix):])
 					regionID, err := strconv.Atoi(string(event.Kv.Value))
 					if err != nil {
 						slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
@@ -204,7 +232,7 @@ func (m *Master) watchRegionServer() {
 					}
 					m.serverUp(ip, regionID)
 				case clientv3.EventTypeDelete:
-					ip := string(event.PrevKv.Key[len(serverPrefix):])
+					ip := string(event.PrevKv.Key[len(discoverPrefix):])
 					regionID, err := strconv.Atoi(string(event.PrevKv.Value))
 					if err != nil {
 						slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
@@ -252,6 +280,16 @@ func (m *Master) serverUp(ip string, regionID int) {
 	}
 	slog.Info(fmt.Sprintf("Region server up: %s", ip))
 	m.servers[ip] = struct{}{}
+
+	// if the region is full, assign the server to the idle list
+	if regionID != 0 && len(m.regions[regionID]) >= regionServerNum {
+		if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+ip, "0"); err != nil {
+			slog.Error(fmt.Sprintf("Failed to update server info: %v", err))
+		}
+		m.regions[0] = append(m.regions[0], ip)
+		slog.Info(fmt.Sprintf("Region %d is full, server %s is assigned to idle list", regionID, ip))
+		return
+	}
 
 	// add the region server to the region array
 	if m.regions[regionID] == nil { // pre-allocate the region array to speed up
@@ -406,7 +444,7 @@ func (m *Master) tableDelete(tableName string) {
 func (m *Master) getVisitTimes() {
 	slog.Info("Getting visit times of each table...")
 	m.visitNum = make(map[int]map[string]int)
-	regionVisitNum := make(map[int]int)
+	m.regionVisitNum = make(map[int]int)
 	resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), visitPrefix, clientv3.WithPrefix())
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to get visit info: %v", err))
@@ -427,9 +465,9 @@ func (m *Master) getVisitTimes() {
 			m.visitNum[regionID] = make(map[string]int)
 		}
 		m.visitNum[regionID][tableName] = times
-		regionVisitNum[regionID] += times
+		m.regionVisitNum[regionID] += times
 	}
-	if len(regionVisitNum) == 0 {
+	if len(m.regionVisitNum) == 0 {
 		slog.Warn("No visit times found")
 		return
 	}
@@ -439,7 +477,7 @@ func (m *Master) getVisitTimes() {
 	minVisitNum := math.MaxInt32
 	maxVisitNum := 0
 	visitAverage := 0.0
-	for regionID, num := range regionVisitNum {
+	for regionID, num := range m.regionVisitNum {
 		visitAverage += float64(num)
 		if num < minVisitNum {
 			minVisitNum = num
@@ -450,14 +488,14 @@ func (m *Master) getVisitTimes() {
 			maxRegionID = regionID
 		}
 	}
-	visitAverage /= float64(len(regionVisitNum))
+	visitAverage /= float64(len(m.regionVisitNum))
 
 	// migrate the tables from the hot region to the cold region
 	if maxVisitNum > int(visitAverage*migrateThresholdHigh) && minVisitNum < int(visitAverage*migrateThresholdLow) {
 		slog.Info(fmt.Sprintf("Region %d is hotest with %d visit times, region %d is coldest with %d visit times, average visit times: %f",
 			maxRegionID, maxVisitNum, minRegionID, minVisitNum, visitAverage))
 		// find an optimal table to migrate
-		curDiff := regionVisitNum[maxRegionID] - regionVisitNum[minRegionID]
+		curDiff := m.regionVisitNum[maxRegionID] - m.regionVisitNum[minRegionID]
 		tableName := ""
 		minDiff := curDiff
 		for name, times := range m.visitNum[maxRegionID] {
@@ -472,7 +510,30 @@ func (m *Master) getVisitTimes() {
 		}
 		// migrate the table
 		slog.Info(fmt.Sprintf("Migrate table %s with %d visit times from region %d to region %d", tableName, m.visitNum[maxRegionID][tableName], maxRegionID, minRegionID))
-		// TODO: Make a request to the region server to migrate the table
+
+		// make a request to the region server to migrate the table
+		postBody, err := json.Marshal(dto.MoveTableRequest{
+			TableName:   tableName,
+			Destination: m.regions[minRegionID][0],
+		})
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to marshal move table request: %v", err))
+			return
+		}
+		resp, err := http.Post(requestWrapper(m.regions[maxRegionID][0], movePath), "application/json", strings.NewReader(string(postBody)))
+		if err != nil {
+			slog.Error(fmt.Sprintf("Failed to migrate table: %v", err))
+			return
+		}
+		defer func(Body io.ReadCloser) {
+			if err := Body.Close(); err != nil {
+				slog.Error(fmt.Sprintf("Failed to close response body: %v", err))
+			}
+		}(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			slog.Error(fmt.Sprintf("Failed to migrate table: %s", resp.Status))
+			return
+		}
 	} else {
 		slog.Info(fmt.Sprintf("Current distribution is balanced, average visit times: %f", visitAverage))
 	}
@@ -528,11 +589,19 @@ func (m *Master) NewTable(tableName string) (string, error) {
 		if len(m.regions[0]) >= backupServerNum+regionServerNum {
 			regionID = m.createNewRegion()
 		} else {
-			// find the region with the least tables
-			minTableNum := math.MaxInt32
-			for id, num := range m.tableNum {
-				if num < minTableNum {
-					minTableNum = num
+			// find the region with the least visits
+			minVisitNum := math.MaxInt32
+			for id := range m.regions {
+				if id == 0 {
+					continue
+				}
+				// first compare the visit times, then the table number
+				if visit, ok := m.regionVisitNum[id]; !ok && minVisitNum > 0 || visit < minVisitNum || visit == minVisitNum && m.tableNum[id] < m.tableNum[regionID] {
+					if !ok {
+						minVisitNum = 0
+					} else {
+						minVisitNum = visit
+					}
 					regionID = id
 				}
 			}
@@ -556,7 +625,7 @@ func (m *Master) NewTable(tableName string) (string, error) {
 func (m *Master) createNewRegion() int {
 	// get the new region servers
 	var newRegionServers []string
-	for i := 0; i < min(regionServerNum, len(m.servers)); i++ {
+	for i := 0; i < min(regionServerNum, len(m.regions[0])); i++ {
 		newRegionServers = append(newRegionServers, m.regions[0][0])
 		m.regions[0] = m.regions[0][1:]
 	}
@@ -570,7 +639,7 @@ func (m *Master) createNewRegion() int {
 		}
 	}
 	// append the new region servers to the new region
-	m.regions[regionID] = make([]string, regionServerNum)
+	m.regions[regionID] = make([]string, len(newRegionServers), regionServerNum)
 	for i, ip := range newRegionServers {
 		m.regions[regionID][i] = ip
 		if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.Itoa(i)); err != nil {
@@ -677,4 +746,8 @@ func (m *Master) Stop() {
 	if err := m.server.Shutdown(ctx); err != nil {
 		slog.Error(fmt.Sprintf("Failed to stop server: %v", err))
 	}
+}
+
+func requestWrapper(ip string, path string) string {
+	return "http://" + ip + ":8080" + path
 }
