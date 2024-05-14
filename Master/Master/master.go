@@ -233,7 +233,12 @@ func (m *Master) watchRegionServer() {
 					m.serverUp(ip, regionID)
 				case clientv3.EventTypeDelete:
 					ip := string(event.PrevKv.Key[len(discoverPrefix):])
-					regionID, err := strconv.Atoi(string(event.PrevKv.Value))
+					resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), serverPrefix+ip)
+					if err != nil {
+						slog.Error(fmt.Sprintf("Failed to get server info: %v", err))
+						continue
+					}
+					regionID, err := strconv.Atoi(string(resp.Kvs[0].Value))
 					if err != nil {
 						slog.Error(fmt.Sprintf("Failed to convert region ID: %v", err))
 						continue
@@ -289,6 +294,10 @@ func (m *Master) serverUp(ip string, regionID int) {
 		m.regions[0] = append(m.regions[0], ip)
 		slog.Info(fmt.Sprintf("Region %d is full, server %s is assigned to idle list", regionID, ip))
 		return
+	} else {
+		if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+ip, strconv.Itoa(regionID)); err != nil {
+			slog.Error(fmt.Sprintf("Failed to update server info: %v", err))
+		}
 	}
 
 	// add the region server to the region array
@@ -315,6 +324,10 @@ func (m *Master) serverDown(ip string, regionID int) {
 		return
 	}
 	slog.Info(fmt.Sprintf("Region server down: %s", ip))
+	// delete server info
+	if _, err := m.etcdClient.Delete(m.etcdClient.Ctx(), serverPrefix+ip); err != nil {
+		slog.Error(fmt.Sprintf("Failed to delete server info: %v", err))
+	}
 
 	if m.regions[regionID] != nil {
 		for i, s := range m.regions[regionID] {
