@@ -3,6 +3,7 @@ package controller
 import (
 	"Region/api/dto"
 	"Region/database"
+	"Region/server"
 	"bytes"
 	"encoding/json"
 	"github.com/gin-gonic/gin"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // 消息队列 当执行表迁移时开启，用于记录增量更新的 sql 语句
@@ -36,7 +38,7 @@ func MoveHandler(c *gin.Context) {
 			Success: false,
 			Data:    "",
 			ErrCode: "400",
-			ErrMsg:  err.Error(),
+			ErrMsg:  "Failed to parse the params",
 		}
 		c.JSON(400, response)
 		return
@@ -50,10 +52,10 @@ func MoveHandler(c *gin.Context) {
 		response := dto.ResponseType[string]{
 			Success: false,
 			Data:    "",
-			ErrCode: "400",
-			ErrMsg:  err.Error(),
+			ErrCode: "500",
+			ErrMsg:  "Failed to dump the table",
 		}
-		c.JSON(400, response)
+		c.JSON(500, response)
 		return
 	}
 
@@ -71,10 +73,11 @@ func MoveHandler(c *gin.Context) {
 		response := dto.ResponseType[string]{
 			Success: false,
 			Data:    "",
-			ErrCode: "400",
+			ErrCode: "500",
 			ErrMsg:  "Failed to send data to destination",
 		}
-		c.JSON(400, response)
+
+		c.JSON(500, response)
 		messageQueue.Activate = false
 		return
 	}
@@ -91,14 +94,39 @@ func MoveHandler(c *gin.Context) {
 			"application/json", bytes.NewBuffer(postBody))
 
 		if err != nil || resp.StatusCode != 200 {
+			messageQueue.Activate = false
+			response := dto.ResponseType[string]{
+				Success: false,
+				Data:    "",
+				ErrCode: "500",
+				ErrMsg:  "Failed to chase the updates",
+			}
+			c.JSON(500, response)
+			return
 		}
+
+		println("delay")
+		time.Sleep(5 * time.Second)
 	}
 
 	messageQueue.Activate = false
 
-	// todo 修改 etcd 中的记录
+	server.Rs.DeleteKey("/table/" + params.TableName)
+	regionId := server.Rs.GetKey("/server/" + params.Destination)
+	server.Rs.PutKey("/table/"+params.TableName, regionId)
 
 	_, err = database.Mysql.Exec("DROP TABLE IF EXISTS " + params.TableName)
+	chaseParams := ChaseParams{
+		Statements: []string{"DROP TABLE IF EXISTS " + params.TableName},
+	}
+	postBody, _ = json.Marshal(chaseParams)
+	slaves := server.Rs.GetSlaves()
+	for _, slave := range slaves {
+		resp, err := http.Post("http://"+slave+":8080/api/table/slave/chase",
+			"application/json", bytes.NewBuffer(postBody))
+		if err != nil || resp.StatusCode != 200 {
+		}
+	}
 
 	response := dto.ResponseType[string]{
 		Success: true,
@@ -117,7 +145,7 @@ func ReceiveHandler(c *gin.Context) {
 			Success: false,
 			Data:    "",
 			ErrCode: "400",
-			ErrMsg:  err.Error(),
+			ErrMsg:  "Failed to parse the params",
 		}
 		c.JSON(400, response)
 		return
@@ -131,14 +159,28 @@ func ReceiveHandler(c *gin.Context) {
 		response := dto.ResponseType[string]{
 			Success: false,
 			Data:    "",
-			ErrCode: "400",
-			ErrMsg:  err.Error(),
+			ErrCode: "500",
+			ErrMsg:  "Failed to import the dumped data",
 		}
-		c.JSON(400, response)
+		c.JSON(500, response)
 		return
 	}
 
-	// todo 将数据转发给 slave node
+	slaves := server.Rs.GetSlaves()
+	for _, slave := range slaves {
+		postBody, err := json.Marshal(params)
+		resp, err := http.Post("http://"+slave+":8080/api/table/slave/receive",
+			"application/json", bytes.NewBuffer(postBody))
+		if err != nil || resp.StatusCode != 200 {
+			response := dto.ResponseType[string]{
+				Success: false,
+				Data:    "",
+				ErrCode: "500",
+				ErrMsg:  "Failed to send data to slave",
+			}
+			c.JSON(500, response)
+		}
+	}
 
 	response := dto.ResponseType[string]{
 		Success: true,
@@ -157,20 +199,38 @@ func ChaseHandler(c *gin.Context) {
 			Success: false,
 			Data:    "",
 			ErrCode: "400",
-			ErrMsg:  err.Error(),
+			ErrMsg:  "Failed to parse the params",
 		}
 		c.JSON(400, response)
 		return
 	}
 
+	begin, _ := database.Mysql.Begin()
+
 	for _, statement := range params.Statements {
-		_, err := database.Mysql.Exec(statement)
+		_, err := begin.Exec(statement)
 		if err != nil {
-			// skip 错误的 sql 语句
 		}
 	}
 
-	// todo 将数据转发给 slave node
+	slaves := server.Rs.GetSlaves()
+	for _, slave := range slaves {
+		postBody, err := json.Marshal(params)
+		resp, err := http.Post("http://"+slave+":8080/api/table/slave/chase",
+			"application/json", bytes.NewBuffer(postBody))
+		if err != nil || resp.StatusCode != 200 {
+			response := dto.ResponseType[string]{
+				Success: false,
+				Data:    "",
+				ErrCode: "500",
+				ErrMsg:  "Failed to send data to slave",
+			}
+			_ = begin.Rollback()
+			c.JSON(500, response)
+		}
+	}
+
+	_ = begin.Commit()
 
 	response := dto.ResponseType[string]{
 		Success: true,

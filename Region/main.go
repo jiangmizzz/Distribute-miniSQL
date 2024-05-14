@@ -8,8 +8,9 @@ import (
 
 func main() {
 	//连接到etcd
-	var rs server.RegionServer
-	rs.ConnectToEtcd()
+	//var rs server.RegionServer
+	//rs.ConnectToEtcd()
+	server.Rs.ConnectToEtcd()
 	//连接数据库
 	database.Mysql = database.InitDB()
 	//初始化路由
