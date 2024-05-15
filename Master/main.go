@@ -1,7 +1,7 @@
 package main
 
 import (
-	. "Master/Master"
+	. "Master/master"
 	"os"
 	"os/signal"
 )
