@@ -79,7 +79,7 @@ func (rs *RegionServer) ConnectToEtcd() {
 // 注册 region server
 func (rs *RegionServer) registerServer() {
 	// 注册 server k-v (有租约）
-	currentIp, _ = rs.getCurrentIp() // 获取当前 ip // 获取当前 ip
+	currentIp, _ = rs.getCurrentIp() // 获取当前 ip
 	if currentIp == "" {
 		slog.Error("get current IP fail! Stop registering server. \n")
 		return
@@ -255,6 +255,7 @@ func (rs *RegionServer) getTables() {
 	}
 }
 
+// 获取当前 ip 地址
 func (rs *RegionServer) getCurrentIp() (string, error) {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {

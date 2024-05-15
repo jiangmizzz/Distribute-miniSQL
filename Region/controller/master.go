@@ -239,6 +239,10 @@ func CreateHandler(c *gin.Context) {
 			ErrMsg:  "Write successfully",
 			Data:    "null",
 		})
+
+		var regionId = server.Rs.RegionId
+		server.Rs.PutKey("/table/"+stmt.TableName, string(regionId))
+
 	} else {
 		//同步有误，回滚操作
 		_ = txn.Rollback()
