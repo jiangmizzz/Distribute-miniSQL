@@ -74,6 +74,7 @@ func (rs *RegionServer) ConnectToEtcd() {
 	rs.registerServer()
 }
 
+// 操作/server/discovery/ip - regionId 键值对，服务发现
 // 注册 region server
 func (rs *RegionServer) registerServer() {
 	// 注册 server k-v (有租约）
@@ -82,7 +83,8 @@ func (rs *RegionServer) registerServer() {
 		slog.Error("get current IP fail! Stop registering server. \n")
 		return
 	}
-	serviceKey := fmt.Sprintf("/%s/%s", serverPrefix, currentIp)
+	//
+	serviceKey := fmt.Sprintf("/%s/discovery/%s", serverPrefix, currentIp)
 
 	// 从本地配置文件里获取 region id
 	viper.SetConfigName("config")
@@ -93,7 +95,7 @@ func (rs *RegionServer) registerServer() {
 		slog.Error(fmt.Sprintf("Error reading server config file, %v\n", confErr))
 	}
 	rs.RegionId = viper.GetInt("server.regionId")
-	//写入 /server/ip - regionId 键值对
+	//写入 /server/find/ip - regionId 键值对
 	_, err := rs.etcdClient.Put(rs.etcdClient.Ctx(), serviceKey, strconv.Itoa(rs.RegionId), clientv3.WithLease(rs.lease.ID)) //持有租约
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to register service: %v\n", err))
@@ -281,6 +283,24 @@ func (rs *RegionServer) getCurrentIp() string {
 		}
 	}
 	return ""
+}
+
+// GetNodes 获取当前 region 中的全部 server 的 ip
+func (rs *RegionServer) GetNodes() []string {
+	ips := make([]string, 0)
+	// /region/regionId/ip - number
+	key := fmt.Sprintf("/%s/%d", regionPrefix, rs.RegionId)
+	resp, err := rs.etcdClient.Get(rs.etcdClient.Ctx(), key, clientv3.WithPrefix())
+	if err != nil {
+		slog.Error(fmt.Sprintf("%s\n", err))
+	} else {
+		for _, kv := range resp.Kvs {
+			parts := strings.Split("/", string(kv.Key))
+			ip := parts[len(parts)-1] // 截取 ip
+			ips = append(ips, ip)     // 添加 ip
+		}
+	}
+	return ips
 }
 
 // ExitFromEtcd 退出 etcd 集群
