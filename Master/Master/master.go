@@ -333,9 +333,11 @@ func (m *Master) serverDown(ip string, regionID int) {
 		for i, s := range m.regions[regionID] {
 			if s == ip {
 				// update successor server's index
-				for j := i + 1; j < len(m.regions[regionID]); j++ {
-					if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+m.regions[regionID][j], strconv.Itoa(j-1)); err != nil {
-						slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+				if regionID != 0 {
+					for j := i + 1; j < len(m.regions[regionID]); j++ {
+						if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+m.regions[regionID][j], strconv.Itoa(j-1)); err != nil {
+							slog.Error(fmt.Sprintf("Failed to update region info: %v", err))
+						}
 					}
 				}
 				// remove the server from the metadata
@@ -638,7 +640,8 @@ func (m *Master) NewTable(tableName string) (string, error) {
 func (m *Master) createNewRegion() int {
 	// get the new region servers
 	var newRegionServers []string
-	for i := 0; i < min(regionServerNum, len(m.regions[0])); i++ {
+	var serverNum = min(regionServerNum, len(m.regions[0]))
+	for i := 0; i < serverNum; i++ {
 		newRegionServers = append(newRegionServers, m.regions[0][0])
 		m.regions[0] = m.regions[0][1:]
 	}
