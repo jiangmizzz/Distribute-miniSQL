@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	etcdEndpoints = "http://etcd_node:2379" // 现有集群中的节点地址
-	serverPrefix  = "server"                // etcd key prefix for new region server
-	regionPrefix  = "region"                // etcd key prefix for new region
-	tablePrefix   = "table"                 // etcd key prefix for new table
-	visitPrefix   = "visit"                 // etcd key prefix for visit
+	etcdEndpoints = "http://120.27.140.232:2379" // 现有集群中的节点地址
+	serverPrefix  = "server"                     // etcd key prefix for new region server
+	regionPrefix  = "region"                     // etcd key prefix for new region
+	tablePrefix   = "table"                      // etcd key prefix for new table
+	visitPrefix   = "visit"                      // etcd key prefix for visit
 )
 
 var (
@@ -306,4 +306,54 @@ func (rs *RegionServer) GetNodes() []string {
 // ExitFromEtcd 退出 etcd 集群
 func (rs *RegionServer) ExitFromEtcd() {
 
+}
+
+func (rs *RegionServer) PutKey(key string, value string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, err := rs.etcdClient.Put(ctx, key, value)
+	cancel()
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to put key %s with value %s: %v", key, value, err))
+	}
+}
+
+func (rs *RegionServer) GetKey(key string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	resp, err := rs.etcdClient.Get(ctx, key)
+	cancel()
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to get key %s: %v", key, err))
+		return ""
+	}
+	if len(resp.Kvs) == 0 {
+		return ""
+	}
+	return string(resp.Kvs[0].Value)
+}
+
+func (rs *RegionServer) DeleteKey(key string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, err := rs.etcdClient.Delete(ctx, key)
+	cancel()
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to delete key %s: %v", key, err))
+	}
+}
+
+func (rs *RegionServer) GetSlaves() []string {
+	keyPrefix := "/region/" + strconv.Itoa(Rs.RegionId) + "/"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	resp, err := rs.etcdClient.Get(ctx, keyPrefix, clientv3.WithPrefix())
+	cancel()
+	if err != nil {
+		slog.Error(fmt.Sprintf("Failed to get key %s: %v", keyPrefix, err))
+		return nil
+	}
+	slaves := make([]string, 0)
+	for _, kv := range resp.Kvs {
+		if string(kv.Value) != "0" {
+			slaves = append(slaves, string(kv.Key[len(keyPrefix):]))
+		}
+	}
+	return slaves
 }

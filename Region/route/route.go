@@ -34,6 +34,11 @@ func SetupRouter() *gin.Engine {
 	apiRoutes.POST("/sql/read", controller.QueryHandler)
 	apiRoutes.POST("/sql/write", controller.WriteHandler)
 	apiRoutes.POST("/table/sync", controller.SyncHandler)
+	apiRoutes.POST("/table/move", controller.MoveHandler)
+	apiRoutes.POST("/table/receive", controller.ReceiveHandler)
+	apiRoutes.POST("/table/chase", controller.ChaseHandler)
+	apiRoutes.POST("/table/slave/receive", controller.SlaveReceiveHandler)
+	apiRoutes.POST("/table/slave/chase", controller.SlaveChaseHandler)
 	//其他路由...
 	return r
 }
