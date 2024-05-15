@@ -51,8 +51,7 @@ func SyncHandler(c *gin.Context) {
 	var txn, err = database.Mysql.Begin()
 
 	// 若当前事务超时，则撤销该操作
-	//FIXME:客户端超时时间
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, _ := context.WithTimeout(context.Background(), 100*time.Millisecond)
 
 	// 事务超时后回滚
 	go func() {
@@ -69,7 +68,7 @@ func SyncHandler(c *gin.Context) {
 	TxnMap[stmt.reqId] = Txn{txn, ctx}
 
 	// 执行出错
-	res, err := txn.Exec(stmt.statement)
+	_, err = txn.Exec(stmt.statement)
 	if err != nil {
 		c.JSON(http.StatusOK, dto.ResponseType[string]{
 			Success: true,

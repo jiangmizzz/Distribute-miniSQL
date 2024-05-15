@@ -209,7 +209,7 @@ func CreateHandler(c *gin.Context) {
 	var txn, err = database.Mysql.Begin()
 
 	// 执行语句
-	res, err := txn.Exec(stmt.Statement)
+	_, err = txn.Exec(stmt.Statement)
 	// 执行出错
 	if driverErr, ok := err.(*mysql.MySQLError); ok {
 		txn.Rollback()
@@ -218,7 +218,7 @@ func CreateHandler(c *gin.Context) {
 		case 1050:
 			// 表已存在
 			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
-				Success: true,
+				Success: false,
 				Data:    "null",
 				ErrCode: "409",
 				ErrMsg:  "duplicate table error",
@@ -226,7 +226,7 @@ func CreateHandler(c *gin.Context) {
 			return
 		default:
 			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
-				Success: true,
+				Success: false,
 				Data:    "null",
 				ErrCode: "403",
 				ErrMsg:  "execution error",
@@ -302,7 +302,7 @@ func DeleteHandler(c *gin.Context) {
 	var txn, err = database.Mysql.Begin()
 
 	// 执行语句
-	res, err := txn.Exec(stmt.Statement)
+	_, err = txn.Exec(stmt.Statement)
 	// 执行出错
 	if driverErr, ok := err.(*mysql.MySQLError); ok {
 		txn.Rollback()
@@ -311,7 +311,7 @@ func DeleteHandler(c *gin.Context) {
 		case 1146:
 			//  对应表不存在
 			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
-				Success: true,
+				Success: false,
 				Data:    "null",
 				ErrCode: "402",
 				ErrMsg:  "table not found",
@@ -319,7 +319,7 @@ func DeleteHandler(c *gin.Context) {
 			return
 		default:
 			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
-				Success: true,
+				Success: false,
 				Data:    "null",
 				ErrCode: "403",
 				ErrMsg:  "execution error",
