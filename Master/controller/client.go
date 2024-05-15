@@ -1,4 +1,4 @@
-package Controller
+package controller
 
 import (
 	"Master/api/dto"
