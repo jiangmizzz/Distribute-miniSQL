@@ -23,7 +23,7 @@ const (
 var (
 	currentIp string            // 当前的 ip 地址
 	leaseTime = 5 * time.Second // 租约有效时间
-	Rs        RegionServer      //rs实例
+	Rs        RegionServer      // rs实例
 )
 
 type RegionServer struct {
@@ -32,9 +32,10 @@ type RegionServer struct {
 	leaseAliveChannel <-chan *clientv3.LeaseKeepAliveResponse // 续约通道响应
 	regionIdChannel   chan int                                // regionId 更新的通道
 	stateWatcher      clientv3.Watcher
-	IsMaster          bool           // 是否是当前 region 里的 master node
-	RegionId          int            // 当前 server 所在 region 的id
-	Visits            map[string]int // 访问量统计 tableName-count
+	IsMaster          bool             // 是否是当前 region 里的 master node
+	RegionId          int              // 当前 server 所在 region 的id
+	Visits            map[string]int   // 访问量统计 tableName-count
+	ticker            <-chan time.Time //统计访问量的计时器
 }
 
 // ConnectToEtcd 连接到 etcd 集群
@@ -172,7 +173,8 @@ func (rs *RegionServer) watchState() {
 				for _, ev := range stateResp.Events {
 					if string(ev.Kv.Value) == "0" {
 						rs.IsMaster = true
-						slog.Info("The server is a master server")
+						fmt.Println("The server is a master server")
+						//slog.Info("The server is a master server")
 					} else if _, err := strconv.Atoi(string(ev.Kv.Value)); err == nil {
 						rs.IsMaster = false
 					} else {
@@ -214,8 +216,10 @@ func (rs *RegionServer) initVisit() {
 	fmt.Print("Start record visits: ")
 	rs.getTables()
 	//每隔 10s 上传一次访问量，然后刷新一遍 map
-	ticker := time.Tick(10 * time.Second)
-	for range ticker {
+	if rs.ticker == nil {
+		rs.ticker = time.Tick(10 * time.Second)
+	}
+	for range rs.ticker {
 		if !rs.IsMaster {
 			fmt.Print("Stop recording visits.\n")
 			return //非 master 情况则退出监听
@@ -266,7 +270,7 @@ func (rs *RegionServer) getCurrentIp() (string, error) {
 	return localAddr.IP.String(), nil
 }
 
-// GetNodes 获取当前 region 中的全部 server 的 ip
+// GetNodes 获取当前 region 中的全部 slave server 的 ip
 func (rs *RegionServer) GetNodes() []string {
 	ips := make([]string, 0)
 	// /region/regionId/ip - number
@@ -276,9 +280,11 @@ func (rs *RegionServer) GetNodes() []string {
 		slog.Error(fmt.Sprintf("%s\n", err))
 	} else {
 		for _, kv := range resp.Kvs {
-			parts := strings.Split("/", string(kv.Key))
-			ip := parts[len(parts)-1] // 截取 ip
-			ips = append(ips, ip)     // 添加 ip
+			if string(kv.Value) != "0" {
+				parts := strings.Split("/", string(kv.Key))
+				ip := parts[len(parts)-1] // 截取 ip
+				ips = append(ips, ip)     // 添加 ip
+			}
 		}
 	}
 	return ips
@@ -286,7 +292,13 @@ func (rs *RegionServer) GetNodes() []string {
 
 // ExitFromEtcd 退出 etcd 集群
 func (rs *RegionServer) ExitFromEtcd() {
-
+	slog.Info("Stop region server...")
+	// close the etcd client
+	if err := rs.etcdClient.Close(); err != nil {
+		slog.Error(fmt.Sprintf("Failed to close etcd client: %s", err))
+		return
+	}
+	return
 }
 
 func (rs *RegionServer) PutKey(key string, value string) {
