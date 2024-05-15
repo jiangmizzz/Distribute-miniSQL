@@ -3,13 +3,14 @@ package server
 import (
 	"context"
 	"fmt"
-	"github.com/spf13/viper"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/spf13/viper"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 const (

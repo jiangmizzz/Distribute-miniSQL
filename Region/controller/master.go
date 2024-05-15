@@ -253,26 +253,16 @@ func CreateHandler(c *gin.Context) {
 	// 执行语句
 	fmt.Print(stmt.Statement)
 	_, err = txn.Exec(stmt.Statement)
-	// 执行出错
-	if driverErr, ok := err.(*mysql.MySQLError); ok {
-		txn.Rollback()
-		// 根据错误编号做对应处理
-		switch driverErr.Number {
-		case 1050:
-			// 表已存在
+	// sql执行有误
+	var driverError *mysql.MySQLError
+	if errors.As(err, &driverError) {
+		fmt.Printf("Execution error! err: %v\n", driverError)
+		if driverError.Number == 1050 { // 表不存在
 			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
 				Success: false,
+				ErrCode: "1050",
+				ErrMsg:  "Table exists",
 				Data:    "null",
-				ErrCode: "409",
-				ErrMsg:  "duplicate table error",
-			})
-			return
-		default:
-			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
-				Success: false,
-				Data:    "null",
-				ErrCode: "403",
-				ErrMsg:  "execution error",
 			})
 			return
 		}
@@ -292,6 +282,10 @@ func CreateHandler(c *gin.Context) {
 			ErrMsg:  "Write successfully",
 			Data:    "null",
 		})
+
+		var regionId = server.Rs.RegionId
+		server.Rs.PutKey("/table/"+stmt.TableName, string(regionId))
+
 	} else {
 		//同步有误，回滚操作
 		_ = txn.Rollback()
@@ -346,26 +340,17 @@ func DeleteHandler(c *gin.Context) {
 
 	// 执行语句
 	_, err = txn.Exec(stmt.Statement)
-	// 执行出错
-	if driverErr, ok := err.(*mysql.MySQLError); ok {
-		txn.Rollback()
-		// 根据错误编号做对应处理
-		switch driverErr.Number {
-		case 1146:
-			//  对应表不存在
+	// sql执行有误
+	var driverError *mysql.MySQLError
+	if errors.As(err, &driverError) {
+		fmt.Printf("Execution error! err: %v\n", driverError)
+		if driverError.Number == 1146 {
+			// 表不存在
 			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
 				Success: false,
+				ErrCode: "1146",
+				ErrMsg:  "Table not exist",
 				Data:    "null",
-				ErrCode: "402",
-				ErrMsg:  "table not found",
-			})
-			return
-		default:
-			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
-				Success: false,
-				Data:    "null",
-				ErrCode: "403",
-				ErrMsg:  "execution error",
 			})
 			return
 		}
