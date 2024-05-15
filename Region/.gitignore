@@ -1,3 +1,4 @@
 pkg
 *.yaml
 database/dbconfig.yaml
+dbconfig.yaml

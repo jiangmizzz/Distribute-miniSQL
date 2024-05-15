@@ -30,6 +30,7 @@ func InitDB() *sql.DB {
 	if conn, err := sql.Open("mysql", dsn); err != nil {
 		panic(err.Error())
 	} else {
+		fmt.Println("connect to DB success")
 		conn.SetConnMaxLifetime(7 * time.Second) //设置空闲时间，这个是比mysql 主动断开的时候短
 		conn.SetMaxOpenConns(10)
 		conn.SetMaxIdleConns(10)

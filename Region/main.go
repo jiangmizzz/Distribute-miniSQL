@@ -8,10 +8,8 @@ import (
 
 func main() {
 	//连接到etcd
-	//var rs server.RegionServer
-	//rs.ConnectToEtcd()
 	server.Rs.ConnectToEtcd()
-	//连接数据库
+	//连接数据库,并初始化全局Mysql对象
 	database.Mysql = database.InitDB()
 	//初始化路由
 	r := route.SetupRouter()
