@@ -5,6 +5,7 @@ import (
 	"Region/database"
 	"Region/server"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,12 +80,53 @@ func QueryHandler(c *gin.Context) {
 		})
 		return
 	}
+	defer rows.Close()
 	//返回列名和各行的值
-	//cols := make([]string, 0)
-	//resRows := make([][]string,0)
-	for rows.Next() {
-
+	cols, colErr := rows.Columns()
+	if colErr != nil {
+		c.JSON(http.StatusInternalServerError, dto.ResponseType[string]{
+			Success: false,
+			ErrCode: "500",
+			ErrMsg:  "Query error: fail to get columns!",
+			Data:    "null",
+		})
+		return
 	}
+	var results [][]string
+	// values：存储每一行原始字节切片形式的值
+	values := make([]interface{}, len(cols))
+	for i := range values {
+		var s sql.RawBytes
+		values[i] = &s
+	}
+	// 扫描每行，将结果添加到 results 中
+	for rows.Next() {
+		if err := rows.Scan(values...); err != nil {
+			c.JSON(http.StatusInternalServerError, dto.ResponseType[string]{
+				Success: false,
+				ErrCode: "500",
+				ErrMsg:  "Query error: fail to scan row!",
+				Data:    "null",
+			})
+			return
+		}
+		var row []string //单行 string 值
+		for _, value := range values {
+			// 将字段值转换为字符串并存储到结果切片中
+			row = append(row, string(*(value.(*sql.RawBytes))))
+		}
+		// 将每行的结果添加到结果集中
+		results = append(results, row)
+	}
+	c.JSON(http.StatusInternalServerError, dto.ResponseType[QueryResponse]{
+		Success: false,
+		ErrCode: "500",
+		ErrMsg:  "Query error: fail to scan row!",
+		Data: QueryResponse{
+			Cols: cols, Rows: results,
+		},
+	})
+	return
 }
 
 // WriteHandler sql写操作
@@ -141,7 +183,7 @@ func WriteHandler(c *gin.Context) {
 	// 执行成功，获取 slave IP，准备同步
 	fmt.Println("Execution success!")
 	slaves := server.Rs.GetNodes()
-	updateVisits(stmt.TableName, 2*len(slaves)) // 更新访问量(+2*len(slaves))
+	updateVisits(stmt.TableName, 2*(len(slaves)+1)) // 更新访问量(+2*len(slaves))
 	// 表同步
 	syncRes := tableSync(slaves, stmt)
 	if syncRes {
@@ -209,6 +251,7 @@ func CreateHandler(c *gin.Context) {
 	var txn, err = database.Mysql.Begin()
 
 	// 执行语句
+	fmt.Print(stmt.Statement)
 	_, err = txn.Exec(stmt.Statement)
 	// 执行出错
 	if driverErr, ok := err.(*mysql.MySQLError); ok {
@@ -671,4 +714,9 @@ type MessageQueue struct {
 	Statements []string
 	Activate   bool
 	Mutex      *sync.RWMutex
+}
+
+type QueryResponse struct {
+	Cols []string   `json:"cols"`
+	Rows [][]string `json:"rows"`
 }
