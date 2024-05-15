@@ -78,7 +78,7 @@ func (rs *RegionServer) ConnectToEtcd() {
 // 注册 region server
 func (rs *RegionServer) registerServer() {
 	// 注册 server k-v (有租约）
-	currentIp = rs.getCurrentIp() // 获取当前 ip
+	currentIp, _ = rs.getCurrentIp() // 获取当前 ip
 	if currentIp == "" {
 		slog.Error("get current IP fail! Stop registering server. \n")
 		return
@@ -255,34 +255,15 @@ func (rs *RegionServer) getTables() {
 }
 
 // 获取当前 ip 地址
-func (rs *RegionServer) getCurrentIp() string {
-	// 获取所有网络接口信息
-	interfaces, err := net.Interfaces()
+func (rs *RegionServer) getCurrentIp() (string, error) {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
-		fmt.Println("Failed to get network interfaces:", err)
-		return ""
+		return "", err
 	}
+	defer conn.Close()
 
-	// 遍历所有网络接口
-	for _, iface := range interfaces {
-		// 排除回环接口和虚拟接口
-		if iface.Flags&net.FlagLoopback == 0 && iface.Flags&net.FlagUp != 0 {
-			addrs, err := iface.Addrs()
-			if err != nil {
-				fmt.Println("Failed to get IP addresses:", err)
-				continue
-			}
-			// 遍历接口的所有 IP 地址
-			for _, addr := range addrs {
-				// 检查地址类型是否是 IP 地址 (这里只找 ipv4 地址)
-				if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
-					fmt.Println("Current IP address:", ipnet.IP.String())
-					return ipnet.IP.String() // 获取到一个地址后立即返回
-				}
-			}
-		}
-	}
-	return ""
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String(), nil
 }
 
 // GetNodes 获取当前 region 中的全部 server 的 ip
