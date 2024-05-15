@@ -11,6 +11,7 @@ type Service interface {
 	QueryTable(tableNames []string) ([]dto.QueryTableResponse, error)
 	NewTable(tableName string) (string, error)
 	DeleteTable(tableName string) (string, error)
+	ShowTable() ([]string, error)
 }
 
 type Controller struct {
@@ -108,5 +109,20 @@ func (controller *Controller) DeleteTable(c *gin.Context) {
 	}
 	response.Success = true
 	response.Data = dto.IPResponse{IP: ip}
+	c.JSON(http.StatusOK, response)
+}
+
+func (controller *Controller) ShowTable(c *gin.Context) {
+	var response dto.ResponseType[dto.ShowTableResponse]
+	tables, err := controller.Service.ShowTable()
+	if err != nil {
+		response.Success = false
+		response.ErrCode = strconv.Itoa(http.StatusInternalServerError)
+		response.ErrMsg = "Failed to show table"
+		c.JSON(http.StatusInternalServerError, response)
+		return
+	}
+	response.Success = true
+	response.Data = dto.ShowTableResponse{TableNames: tables}
 	c.JSON(http.StatusOK, response)
 }
