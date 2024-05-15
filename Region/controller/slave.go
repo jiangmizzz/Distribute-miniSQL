@@ -4,13 +4,138 @@ import (
 	"Region/api/dto"
 	"Region/database"
 	"bytes"
+	"context"
+	"database/sql"
+	"fmt"
+	"net/http"
+	"os/exec"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
-	"os/exec"
 )
 
-// 从master同步数据
+type SyncStatement struct {
+	reqId     string `json:"reqId"`
+	statement string `json:"statement"`
+}
+
+type CommitStatement struct {
+	reqId    string `json:"reqId"`
+	isCommit bool   `json:"isCommit"`
+}
+
+type Txn struct {
+	txn *sql.Tx
+	ctx context.Context
+}
+
+// 正在执行的事务列表
+var TxnMap = make(map[string]Txn)
+
+// 从master同步数据，开启事务
 func SyncHandler(c *gin.Context) {
+	var stmt SyncStatement
+	c.BindJSON(&stmt)
+	// 存在正在处理的事务
+	if TxnMap[stmt.reqId].txn != nil {
+		c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+			Success: false,
+			Data:    "null",
+			ErrCode: "400",
+			ErrMsg:  "transaction exists",
+		})
+		return
+	}
+
+	var txn, err = database.Mysql.Begin()
+
+	// 若当前事务超时，则撤销该操作
+	//FIXME:客户端超时时间
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	// 事务超时后回滚
+	go func() {
+		<-ctx.Done()
+		if TxnMap[stmt.reqId].txn != nil {
+			err := TxnMap[stmt.reqId].txn.Rollback()
+			if err != nil {
+				fmt.Println("Rollback error:", err)
+			}
+			delete(TxnMap, stmt.reqId)
+		}
+	}()
+
+	TxnMap[stmt.reqId] = Txn{txn, ctx}
+
+	// 执行出错
+	res, err := txn.Exec(stmt.statement)
+	if err != nil {
+		c.JSON(http.StatusOK, dto.ResponseType[string]{
+			Success: true,
+			Data:    "null",
+			ErrCode: "400",
+			ErrMsg:  err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.ResponseType[string]{
+		Success: true,
+		Data:    "null",
+		ErrCode: "200",
+		ErrMsg:  "success",
+	})
+	return
+
+}
+
+// 收到master的commit/rollback请求，执行/回滚事务
+func CommitHandler(c *gin.Context) {
+	var stmt CommitStatement
+	if err := c.BindJSON(&stmt); err != nil {
+		// 绑定statement失败，返回错误信息
+		c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+			Success: true,
+			Data:    "",
+			ErrCode: "400",
+			ErrMsg:  "parameter error",
+		})
+		return
+	}
+
+	if TxnMap[stmt.reqId].txn == nil {
+		c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+			Success: true,
+			Data:    "",
+			ErrCode: "401",
+			ErrMsg:  "transaction not exists",
+		})
+		return
+	} else {
+		if stmt.isCommit {
+			err := TxnMap[stmt.reqId].txn.Commit()
+			if err != nil {
+				fmt.Println("Commit error:", err)
+			}
+		} else {
+			err := TxnMap[stmt.reqId].txn.Rollback()
+			if err != nil {
+				fmt.Println("Rollback error:", err)
+			}
+		}
+
+		TxnMap[stmt.reqId].ctx.Done()
+		delete(TxnMap, stmt.reqId)
+
+		c.JSON(http.StatusOK, dto.ResponseType[string]{
+			Success: true,
+			Data:    "null",
+			ErrCode: "200",
+			ErrMsg:  "success",
+		})
+		return
+	}
 
 }
 
