@@ -15,7 +15,7 @@ func main() {
 	//初始化路由
 	r := route.SetupRouter()
 	//默认监听在 8080 端口
-	err := r.Run("0.0.0.0:8081")
+	err := r.Run("0.0.0.0:8080")
 	if err != nil {
 		return
 	}
