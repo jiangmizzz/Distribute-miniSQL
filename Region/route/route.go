@@ -2,6 +2,7 @@ package route
 
 import (
 	"Region/controller"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -33,7 +34,10 @@ func SetupRouter() *gin.Engine {
 	//配置路由
 	apiRoutes.POST("/sql/read", controller.QueryHandler)
 	apiRoutes.POST("/sql/write", controller.WriteHandler)
+	apiRoutes.POST("/sql/create", controller.CreateHandler)
+	apiRoutes.POST("/sql/delete", controller.DeleteHandler)
 	apiRoutes.POST("/table/sync", controller.SyncHandler)
+	apiRoutes.POST("/table/commit", controller.CommitHandler)
 	apiRoutes.POST("/table/move", controller.MoveHandler)
 	apiRoutes.POST("/table/receive", controller.ReceiveHandler)
 	apiRoutes.POST("/table/chase", controller.ChaseHandler)

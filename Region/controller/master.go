@@ -8,13 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/go-sql-driver/mysql"
-	"github.com/spf13/viper"
 	"net/http"
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/go-sql-driver/mysql"
+	"github.com/spf13/viper"
 )
 
 // 消息队列 当执行表迁移时开启，用于记录增量更新的 sql 语句
@@ -141,6 +142,195 @@ func WriteHandler(c *gin.Context) {
 	fmt.Println("Execution success!")
 	slaves := server.Rs.GetNodes()
 	updateVisits(stmt.TableName, 2*len(slaves)) // 更新访问量(+2*len(slaves))
+	// 表同步
+	syncRes := tableSync(slaves, stmt)
+	if syncRes {
+		// slave 均无误后，自己提交txn
+		_ = txn.Commit()
+		reqQueue.Add(stmt.ReqId) // 添加 reqId
+		c.JSON(http.StatusOK, dto.ResponseType[string]{
+			Success: true,
+			ErrCode: "200",
+			ErrMsg:  "Write successfully",
+			Data:    "null",
+		})
+	} else {
+		//同步有误，回滚操作
+		_ = txn.Rollback()
+		c.JSON(http.StatusInternalServerError, dto.ResponseType[string]{
+			Success: false,
+			ErrCode: "500",
+			ErrMsg:  "Sync error",
+			Data:    "null",
+		})
+	}
+	// 向 slave 同步 commit 信号
+	for ip := range slaves {
+		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
+		data := make(map[string]interface{})
+		data["reqId"] = stmt.ReqId
+		data["isCommit"] = syncRes
+		bytesData, _ := json.Marshal(data)
+		go func() {
+			_, err := http.Post(url, "application/json", bytes.NewBuffer(bytesData))
+			if err != nil {
+				fmt.Println("Sync commit fail")
+			}
+		}()
+	}
+}
+
+// 创建新表
+func CreateHandler(c *gin.Context) {
+	//检查是否为master状态
+	if checkStatus(c) {
+		return
+	}
+
+	var stmt SqlStatement
+
+	if err := c.BindJSON(&stmt); err != nil {
+		// 绑定statement失败，返回错误信息
+		c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+			Success: false,
+			Data:    "null",
+			ErrCode: "400",
+			ErrMsg:  "parameter error",
+		})
+		return
+	}
+
+	// 判断该 req 是否已经执行过
+	if checkReq(c, stmt.ReqId) {
+		return
+	}
+
+	// 开启事务
+	var txn, err = database.Mysql.Begin()
+
+	// 执行语句
+	res, err := txn.Exec(stmt.Statement)
+	// 执行出错
+	if driverErr, ok := err.(*mysql.MySQLError); ok {
+		txn.Rollback()
+		// 根据错误编号做对应处理
+		switch driverErr.Number {
+		case 1050:
+			// 表已存在
+			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+				Success: true,
+				Data:    "null",
+				ErrCode: "409",
+				ErrMsg:  "duplicate table error",
+			})
+			return
+		default:
+			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+				Success: true,
+				Data:    "null",
+				ErrCode: "403",
+				ErrMsg:  "execution error",
+			})
+			return
+		}
+	}
+	// 执行成功，获取 slave IP，准备同步
+	fmt.Println("Execution success!")
+	slaves := server.Rs.GetNodes()
+	// 表同步
+	syncRes := tableSync(slaves, stmt)
+	if syncRes {
+		// slave 均无误后，自己提交txn
+		_ = txn.Commit()
+		reqQueue.Add(stmt.ReqId) // 添加 reqId
+		c.JSON(http.StatusOK, dto.ResponseType[string]{
+			Success: true,
+			ErrCode: "200",
+			ErrMsg:  "Write successfully",
+			Data:    "null",
+		})
+	} else {
+		//同步有误，回滚操作
+		_ = txn.Rollback()
+		c.JSON(http.StatusInternalServerError, dto.ResponseType[string]{
+			Success: false,
+			ErrCode: "500",
+			ErrMsg:  "Sync error",
+			Data:    "null",
+		})
+	}
+	// 向 slave 同步 commit 信号
+	for ip := range slaves {
+		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
+		data := make(map[string]interface{})
+		data["reqId"] = stmt.ReqId
+		data["isCommit"] = syncRes
+		bytesData, _ := json.Marshal(data)
+		go func() {
+			_, err := http.Post(url, "application/json", bytes.NewBuffer(bytesData))
+			if err != nil {
+				fmt.Println("Sync commit fail")
+			}
+		}()
+	}
+}
+
+// 删除已有的表
+func DeleteHandler(c *gin.Context) {
+	//检查是否为master状态
+	if checkStatus(c) {
+		return
+	}
+	var stmt SqlStatement
+	if err := c.BindJSON(&stmt); err != nil {
+		// 绑定statement失败，返回错误信息
+		c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+			Success: false,
+			Data:    "",
+			ErrCode: "400",
+			ErrMsg:  "parameter error",
+		})
+		return
+	}
+
+	// 判断该 req 是否已经执行过
+	if checkReq(c, stmt.ReqId) {
+		return
+	}
+
+	// 开启事务
+	var txn, err = database.Mysql.Begin()
+
+	// 执行语句
+	res, err := txn.Exec(stmt.Statement)
+	// 执行出错
+	if driverErr, ok := err.(*mysql.MySQLError); ok {
+		txn.Rollback()
+		// 根据错误编号做对应处理
+		switch driverErr.Number {
+		case 1146:
+			//  对应表不存在
+			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+				Success: true,
+				Data:    "null",
+				ErrCode: "402",
+				ErrMsg:  "table not found",
+			})
+			return
+		default:
+			c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
+				Success: true,
+				Data:    "null",
+				ErrCode: "403",
+				ErrMsg:  "execution error",
+			})
+			return
+		}
+	}
+
+	// 执行成功，获取 slave IP，准备同步
+	fmt.Println("Execution success!")
+	slaves := server.Rs.GetNodes()
 	// 表同步
 	syncRes := tableSync(slaves, stmt)
 	if syncRes {
