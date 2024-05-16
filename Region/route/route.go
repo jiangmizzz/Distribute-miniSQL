@@ -43,6 +43,7 @@ func SetupRouter() *gin.Engine {
 	apiRoutes.POST("/table/chase", controller.ChaseHandler)
 	apiRoutes.POST("/table/slave/receive", controller.SlaveReceiveHandler)
 	apiRoutes.POST("/table/slave/chase", controller.SlaveChaseHandler)
+	apiRoutes.POST("/node/sync", controller.NodeSyncHandler)
 	//其他路由...
 	return r
 }
