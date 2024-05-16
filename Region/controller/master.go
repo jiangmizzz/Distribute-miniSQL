@@ -9,21 +9,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"os/exec"
-	"sync"
-	"time"
-
 	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/viper"
+	"net/http"
+	"os/exec"
+	"sync"
 )
 
 // 消息队列 当执行表迁移时开启，用于记录增量更新的 sql 语句
 var messageQueue = MessageQueue{
 	Statements: []string{},
 	Activate:   false,
-	Mutex:      &sync.RWMutex{},
+	TableName:  "",
+}
+
+var nodeMessageQueue = MessageQueue{
+	Statements: []string{},
+	Activate:   false,
 }
 
 // 用sql指令进行数据查询
@@ -468,6 +471,16 @@ func tableSync(ips []string, stmt SqlStatement) bool {
 			syncSuccess = false
 		}
 	}
+
+	if syncSuccess {
+		// 若消息队列开启，则将 sql 语句添加到队列中用于追赶
+		if messageQueue.Activate && messageQueue.TableName == stmt.TableName {
+			messageQueue.Statements = append(messageQueue.Statements, stmt.Statement)
+		}
+		if nodeMessageQueue.Activate {
+			nodeMessageQueue.Statements = append(nodeMessageQueue.Statements, stmt.Statement)
+		}
+	}
 	return syncSuccess
 }
 
@@ -501,6 +514,7 @@ func MoveHandler(c *gin.Context) {
 
 	// 开始记录新的 sql 语句
 	messageQueue.Activate = true
+	messageQueue.TableName = params.TableName
 
 	receiveParams := ReceiveParams{
 		Statements: string(stdout),
@@ -523,12 +537,10 @@ func MoveHandler(c *gin.Context) {
 	}
 
 	for len(messageQueue.Statements) > 0 {
-		messageQueue.Mutex.Lock()
 		chaseParams := ChaseParams{
 			Statements: messageQueue.Statements,
 		}
 		messageQueue.Statements = []string{}
-		messageQueue.Mutex.Unlock()
 		postBody, err := json.Marshal(chaseParams)
 		resp, err := http.Post("http://"+params.Destination+":8080/api/table/chase",
 			"application/json", bytes.NewBuffer(postBody))
@@ -544,12 +556,10 @@ func MoveHandler(c *gin.Context) {
 			c.JSON(500, response)
 			return
 		}
-
-		println("delay")
-		time.Sleep(5 * time.Second)
 	}
 
 	messageQueue.Activate = false
+	messageQueue.TableName = ""
 
 	server.Rs.DeleteKey("/table/" + params.TableName)
 	regionId := server.Rs.GetKey("/server/" + params.Destination)
@@ -567,6 +577,90 @@ func MoveHandler(c *gin.Context) {
 		if err != nil || resp.StatusCode != 200 {
 		}
 	}
+
+	response := dto.ResponseType[string]{
+		Success: true,
+		Data:    "Done",
+		ErrCode: "200",
+		ErrMsg:  "",
+	}
+	c.JSON(200, response)
+	return
+}
+
+func NodeSyncHandler(c *gin.Context) {
+	var params SyncPrams
+	if err := c.BindJSON(&params); err != nil {
+		response := dto.ResponseType[string]{
+			Success: false,
+			Data:    "",
+			ErrCode: "400",
+			ErrMsg:  "Failed to parse the params",
+		}
+		c.JSON(400, response)
+		return
+	}
+	cmd := exec.Command("mysqldump", viper.GetString("database.dbname"),
+		"-u"+viper.GetString("database.username"),
+		"-p"+viper.GetString("database.password"), "--skip-comments")
+	stdout, err := cmd.Output()
+
+	if err != nil {
+		response := dto.ResponseType[string]{
+			Success: false,
+			Data:    "",
+			ErrCode: "500",
+			ErrMsg:  "Failed to dump the database",
+		}
+		c.JSON(500, response)
+		return
+	}
+
+	nodeMessageQueue.Activate = true
+
+	receiveParams := ReceiveParams{
+		Statements: string(stdout),
+	}
+	postBody, err := json.Marshal(receiveParams)
+	resp, err := http.Post("http://"+params.Destination+":8080/api/table/slave/receive",
+		"application/json", bytes.NewBuffer(postBody))
+
+	if err != nil || resp.StatusCode != 200 {
+		response := dto.ResponseType[string]{
+			Success: false,
+			Data:    "",
+			ErrCode: "500",
+			ErrMsg:  "Failed to send data to destination",
+		}
+
+		c.JSON(500, response)
+		nodeMessageQueue.Activate = false
+		return
+	}
+
+	for len(nodeMessageQueue.Statements) > 0 {
+		chaseParams := ChaseParams{
+			Statements: nodeMessageQueue.Statements,
+		}
+		nodeMessageQueue.Statements = []string{}
+		postBody, err := json.Marshal(chaseParams)
+		resp, err := http.Post("http://"+params.Destination+":8080/api/table/slave/chase",
+			"application/json", bytes.NewBuffer(postBody))
+
+		if err != nil || resp.StatusCode != 200 {
+			nodeMessageQueue.Activate = false
+			response := dto.ResponseType[string]{
+				Success: false,
+				Data:    "",
+				ErrCode: "500",
+				ErrMsg:  "Failed to chase the updates",
+			}
+			c.JSON(500, response)
+			return
+		}
+	}
+
+	nodeMessageQueue.Activate = false
 
 	response := dto.ResponseType[string]{
 		Success: true,
@@ -687,6 +781,10 @@ type MoveParams struct {
 	Destination string `json:"destination"`
 }
 
+type SyncPrams struct {
+	Destination string `json:"destination"`
+}
+
 type ReceiveParams struct {
 	Statements string `json:"statements"`
 }
@@ -698,7 +796,7 @@ type ChaseParams struct {
 type MessageQueue struct {
 	Statements []string
 	Activate   bool
-	Mutex      *sync.RWMutex
+	TableName  string
 }
 
 type QueryResponse struct {
