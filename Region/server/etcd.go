@@ -165,6 +165,11 @@ func (rs *RegionServer) watchState() {
 			continue
 		}
 		stateKey := fmt.Sprintf("/%s/%d/%s", regionPrefix, regionId, currentIp)
+		value := rs.GetKey(stateKey)
+		if value == "0" {
+			rs.IsMaster = true
+			fmt.Println("The server is a master server")
+		}
 		rs.stateWatcher = clientv3.NewWatcher(rs.etcdClient) //建立监听
 		stateChannel := rs.stateWatcher.Watch(context.Background(), stateKey)
 		fmt.Printf("Start watching region state: regionId = %d\n", regionId)
