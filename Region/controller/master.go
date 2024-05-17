@@ -214,9 +214,10 @@ func WriteHandler(c *gin.Context) {
 	// 向 slave 同步 commit 信号
 	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
-		data := make(map[string]interface{})
-		data["reqId"] = stmt.ReqId
-		data["isCommit"] = syncRes
+		data := CommitStatement{
+			reqId:    stmt.ReqId,
+			isCommit: syncRes,
+		}
 		bytesData, _ := json.Marshal(data)
 		go func() {
 			_, err := http.Post(url, "application/json", bytes.NewBuffer(bytesData))
@@ -304,9 +305,10 @@ func CreateHandler(c *gin.Context) {
 	// 向 slave 同步 commit 信号
 	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
-		data := make(map[string]interface{})
-		data["reqId"] = stmt.ReqId
-		data["isCommit"] = syncRes
+		data := CommitStatement{
+			reqId:    stmt.ReqId,
+			isCommit: syncRes,
+		}
 		bytesData, _ := json.Marshal(data)
 		go func() {
 			_, err := http.Post(url, "application/json", bytes.NewBuffer(bytesData))
@@ -390,9 +392,10 @@ func DeleteHandler(c *gin.Context) {
 	// 向 slave 同步 commit 信号
 	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
-		data := make(map[string]interface{})
-		data["reqId"] = stmt.ReqId
-		data["isCommit"] = syncRes
+		data := CommitStatement{
+			reqId:    stmt.ReqId,
+			isCommit: syncRes,
+		}
 		bytesData, _ := json.Marshal(data)
 		go func() {
 			_, err := http.Post(url, "application/json", bytes.NewBuffer(bytesData))
@@ -446,9 +449,9 @@ func tableSync(ips []string, stmt SqlStatement) bool {
 	// 放置请求结果的通道
 	results := make(chan *http.Response, len(ips))
 	// 构造 post 请求参数
-	data := make(map[string]string)
-	data["reqId"] = stmt.ReqId
-	data["statement"] = stmt.Statement
+	var data SyncStatement
+	data.reqId = stmt.ReqId
+	data.statement = stmt.Statement
 	bytesData, _ := json.Marshal(data)
 	for _, ip := range ips {
 		wg.Add(1)

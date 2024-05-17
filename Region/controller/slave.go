@@ -47,7 +47,6 @@ func SyncHandler(c *gin.Context) {
 		})
 		return
 	}
-
 	var txn, err = database.Mysql.Begin()
 
 	// 若当前事务超时，则撤销该操作
@@ -102,7 +101,7 @@ func CommitHandler(c *gin.Context) {
 		})
 		return
 	}
-
+	//fmt.Println(stmt.isCommit)
 	if TxnMap[stmt.reqId].txn == nil {
 		c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
 			Success: true,
