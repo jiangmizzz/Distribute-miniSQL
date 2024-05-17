@@ -33,6 +33,7 @@ const (
 	visitPrefix             = "/visit/"
 
 	movePath = "/table/move"
+	syncPath = "/node/sync"
 
 	regionServerNum    = 3   // the number of region servers in a region
 	backupServerNum    = 2   // the number of idle servers for backup
@@ -314,6 +315,11 @@ func (m *Master) serverUpWhenInit(ip string, regionID int, index int) {
 	if _, ok := m.tableNum[regionID]; !ok && regionID != 0 {
 		m.tableNum[regionID] = 0
 	}
+
+	// update server info
+	if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+ip, strconv.Itoa(regionID)); err != nil {
+		log.Error(fmt.Sprintf("Failed to update server info: %s", color.RedString(err.Error())))
+	}
 }
 
 func (m *Master) serverUp(ip string, regionID int) {
@@ -333,6 +339,10 @@ func (m *Master) serverUp(ip string, regionID int) {
 		log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(ip), color.YellowString("%d", regionID), color.GreenString("0")))
 		return
 	} else {
+		if regionID != 0 && len(m.regions[regionID]) > 0 {
+			m.requestSync(ip, m.regions[regionID][0])
+		}
+
 		if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+ip, strconv.Itoa(regionID)); err != nil {
 			log.Error(fmt.Sprintf("Failed to update server info: %s", color.RedString(err.Error())))
 		}
@@ -397,9 +407,9 @@ func (m *Master) serverDown(ip string, regionID int) {
 			}
 		}
 		// delete the region list if it is empty
-		if len(m.regions[regionID]) == 0 {
+		if regionID != 0 && len(m.regions[regionID]) == 0 {
 			log.Info(fmt.Sprintf("Region %s is %s", color.YellowString(strconv.Itoa(regionID)), color.RedString("empty")))
-			m.regions[regionID] = nil
+			delete(m.regions, regionID)
 		}
 		// delete the server info
 		if _, err := m.etcdClient.Delete(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip); err != nil {
@@ -407,7 +417,7 @@ func (m *Master) serverDown(ip string, regionID int) {
 		}
 
 		// try to get an idle server to replace the down server if necessary
-		if regionID != 0 && len(m.regions[regionID]) < regionServerNum && len(m.regions[0]) > 0 {
+		if regionID != 0 && len(m.regions[regionID]) > 0 && len(m.regions[regionID]) < regionServerNum && len(m.regions[0]) > 0 {
 			newServer := m.regions[0][0]
 			m.regions[0] = m.regions[0][1:]
 			// update the server info
@@ -419,10 +429,37 @@ func (m *Master) serverDown(ip string, regionID int) {
 				log.Error(fmt.Sprintf("Failed to update region info: %s", color.RedString(err.Error())))
 			}
 			m.regions[regionID] = append(m.regions[regionID], newServer)
+			m.requestSync(newServer, m.regions[regionID][0])
 			log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(newServer), color.YellowString("0"), color.GreenString("%d", regionID)))
 		}
 	} else {
 		log.Error(color.RedString("Region %s is not found", regionID))
+	}
+}
+
+func (m *Master) requestSync(ip string, master string) {
+	// make a request to the region server to sync the data
+	log.Info(fmt.Sprintf("Requesting region server %s to sync data", color.BlueString(ip)))
+	postBody, err := json.Marshal(dto.SyncDataRequest{
+		Destination: master,
+	})
+	if err != nil {
+		log.Error(fmt.Sprintf("Failed to marshal sync data request: %s", color.RedString(err.Error())))
+		return
+	}
+	resp, err := http.Post(requestWrapper(ip, syncPath), "application/json", strings.NewReader(string(postBody)))
+	if err != nil {
+		log.Error(fmt.Sprintf("Failed to sync data: %s", color.RedString(err.Error())))
+		return
+	}
+	defer func(Body io.ReadCloser) {
+		if err := Body.Close(); err != nil {
+			log.Error(fmt.Sprintf("Failed to close response body: %s", color.RedString(err.Error())))
+		}
+	}(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		log.Error(fmt.Sprintf("Failed to sync data: %s", color.RedString(resp.Status)))
+		return
 	}
 }
 
@@ -586,10 +623,10 @@ func (m *Master) loadBalance() {
 			log.Info("No table will be moved because move any table will make the distribution worse")
 			return
 		}
-		// migrate the table
+		// move the table
 		log.Info(fmt.Sprintf("Table %s: %stimes is moved:\t%s --> %s", color.BlueString(tableName), color.BlueString("%d", m.visitNum[maxRegionID][tableName]), color.RedString("%d", maxRegionID), color.GreenString("%d", minRegionID)))
 
-		// make a request to the region server to migrate the table
+		// make a request to the region server to move the table
 		postBody, err := json.Marshal(dto.MoveTableRequest{
 			TableName:   tableName,
 			Destination: m.regions[minRegionID][0],
@@ -609,7 +646,7 @@ func (m *Master) loadBalance() {
 			}
 		}(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			log.Error(fmt.Sprintf("Failed to migrate table: %s", color.RedString(resp.Status)))
+			log.Error(fmt.Sprintf("Failed to move table: %s", color.RedString(resp.Status)))
 			return
 		}
 	} else {
@@ -645,6 +682,7 @@ func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, erro
 			continue
 		}
 		tables[len(tables)-1].IP = m.regions[regionID][0]
+		log.Info(fmt.Sprintf("Table %s is found in region %s: %s", color.GreenString(tableName), color.GreenString("%d", regionID), color.BlueString(m.regions[regionID][0])))
 	}
 	return tables, nil
 }
@@ -701,6 +739,7 @@ func (m *Master) NewTable(tableName string) (string, error) {
 	if !m.checkRegionSafety(regionID) {
 		return "", errors.New("no enough region servers")
 	}
+	log.Info(fmt.Sprintf("Table %s is created in region %s: %s", color.GreenString(tableName), color.GreenString("%d", regionID), color.BlueString(m.regions[regionID][0])))
 	return m.regions[regionID][0], nil
 }
 
@@ -749,6 +788,7 @@ func (m *Master) DeleteTable(tableName string) (string, error) {
 	if len(m.regions[regionID]) == 0 || !m.checkRegionSafety(regionID) {
 		return "", errors.New("no enough region servers")
 	}
+	log.Info(fmt.Sprintf("Table %s is removed from region %s: %s", color.RedString(tableName), color.GreenString("%d", regionID), color.BlueString(m.regions[regionID][0])))
 	return m.regions[regionID][0], nil
 }
 
@@ -761,7 +801,7 @@ func (m *Master) checkRegionSafety(regionID int) bool {
 
 	for len(m.regions[regionID]) < regionMinServerNum {
 		// try to assign idle servers to the region
-		if m.regions[0] != nil && len(m.regions[0]) > 0 {
+		if len(m.regions[0]) > 0 {
 			newServer := m.regions[0][0]
 			m.regions[0] = m.regions[0][1:]
 			// update the server info
@@ -775,6 +815,7 @@ func (m *Master) checkRegionSafety(regionID int) bool {
 				return false
 			}
 			m.regions[regionID] = append(m.regions[regionID], newServer)
+			m.requestSync(newServer, m.regions[regionID][0])
 			log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(newServer), color.YellowString("0"), color.GreenString("%d", regionID)))
 		} else {
 			log.Warn(fmt.Sprintf("Region %s has no enough servers", color.YellowString("%d", regionID)))
