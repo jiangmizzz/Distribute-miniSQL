@@ -95,7 +95,7 @@ func (rs *RegionServer) registerServer() {
 	if confErr != nil {
 		slog.Error(fmt.Sprintf("Error reading server config file, %v\n", confErr))
 	}
-	rs.RegionId = viper.GetInt("server.regionId")
+	rs.RegionId = viper.GetInt("server.region")
 	//写入 /server/find/ip - regionId 键值对
 	_, err := rs.etcdClient.Put(rs.etcdClient.Ctx(), serviceKey, strconv.Itoa(rs.RegionId), clientv3.WithLease(rs.lease.ID)) //持有租约
 	if err != nil {
