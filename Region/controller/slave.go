@@ -16,13 +16,13 @@ import (
 )
 
 type SyncStatement struct {
-	reqId     string `json:"reqId"`
-	statement string `json:"statement"`
+	ReqId     string `json:"reqId"`
+	Statement string `json:"statement"`
 }
 
 type CommitStatement struct {
-	reqId    string `json:"reqId"`
-	isCommit bool   `json:"isCommit"`
+	ReqId    string `json:"reqId"`
+	IsCommit bool   `json:"isCommit"`
 }
 
 type Txn struct {
@@ -38,7 +38,7 @@ func SyncHandler(c *gin.Context) {
 	var stmt SyncStatement
 	c.BindJSON(&stmt)
 	// 存在正在处理的事务
-	if TxnMap[stmt.reqId].txn != nil {
+	if TxnMap[stmt.ReqId].txn != nil {
 		c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
 			Success: false,
 			Data:    "null",
@@ -55,19 +55,19 @@ func SyncHandler(c *gin.Context) {
 	// 事务超时后回滚
 	go func() {
 		<-ctx.Done()
-		if TxnMap[stmt.reqId].txn != nil {
-			err := TxnMap[stmt.reqId].txn.Rollback()
+		if TxnMap[stmt.ReqId].txn != nil {
+			err := TxnMap[stmt.ReqId].txn.Rollback()
 			if err != nil {
 				fmt.Println("Rollback error:", err)
 			}
-			delete(TxnMap, stmt.reqId)
+			delete(TxnMap, stmt.ReqId)
 		}
 	}()
 
-	TxnMap[stmt.reqId] = Txn{txn, ctx}
+	TxnMap[stmt.ReqId] = Txn{txn, ctx}
 
 	// 执行出错
-	_, err = txn.Exec(stmt.statement)
+	_, err = txn.Exec(stmt.Statement)
 	if err != nil {
 		c.JSON(http.StatusOK, dto.ResponseType[string]{
 			Success: true,
@@ -102,7 +102,7 @@ func CommitHandler(c *gin.Context) {
 		return
 	}
 	//fmt.Println(stmt.isCommit)
-	if TxnMap[stmt.reqId].txn == nil {
+	if TxnMap[stmt.ReqId].txn == nil {
 		c.JSON(http.StatusBadRequest, dto.ResponseType[string]{
 			Success: true,
 			Data:    "",
@@ -111,20 +111,20 @@ func CommitHandler(c *gin.Context) {
 		})
 		return
 	} else {
-		if stmt.isCommit {
-			err := TxnMap[stmt.reqId].txn.Commit()
+		if stmt.IsCommit {
+			err := TxnMap[stmt.ReqId].txn.Commit()
 			if err != nil {
 				fmt.Println("Commit error:", err)
 			}
 		} else {
-			err := TxnMap[stmt.reqId].txn.Rollback()
+			err := TxnMap[stmt.ReqId].txn.Rollback()
 			if err != nil {
 				fmt.Println("Rollback error:", err)
 			}
 		}
 
-		TxnMap[stmt.reqId].ctx.Done()
-		delete(TxnMap, stmt.reqId)
+		TxnMap[stmt.ReqId].ctx.Done()
+		delete(TxnMap, stmt.ReqId)
 
 		c.JSON(http.StatusOK, dto.ResponseType[string]{
 			Success: true,

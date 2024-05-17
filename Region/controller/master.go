@@ -123,10 +123,10 @@ func QueryHandler(c *gin.Context) {
 		// 将每行的结果添加到结果集中
 		results = append(results, row)
 	}
-	c.JSON(http.StatusInternalServerError, dto.ResponseType[QueryResponse]{
-		Success: false,
-		ErrCode: "500",
-		ErrMsg:  "Query error: fail to scan row!",
+	c.JSON(http.StatusOK, dto.ResponseType[QueryResponse]{
+		Success: true,
+		ErrCode: "200",
+		ErrMsg:  "Query successfully!",
 		Data: QueryResponse{
 			Cols: cols, Rows: results,
 		},
@@ -215,8 +215,8 @@ func WriteHandler(c *gin.Context) {
 	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
 		data := CommitStatement{
-			reqId:    stmt.ReqId,
-			isCommit: syncRes,
+			ReqId:    stmt.ReqId,
+			IsCommit: syncRes,
 		}
 		bytesData, _ := json.Marshal(data)
 		go func() {
@@ -306,8 +306,8 @@ func CreateHandler(c *gin.Context) {
 	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
 		data := CommitStatement{
-			reqId:    stmt.ReqId,
-			isCommit: syncRes,
+			ReqId:    stmt.ReqId,
+			IsCommit: syncRes,
 		}
 		bytesData, _ := json.Marshal(data)
 		go func() {
@@ -393,8 +393,8 @@ func DeleteHandler(c *gin.Context) {
 	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
 		data := CommitStatement{
-			reqId:    stmt.ReqId,
-			isCommit: syncRes,
+			ReqId:    stmt.ReqId,
+			IsCommit: syncRes,
 		}
 		bytesData, _ := json.Marshal(data)
 		go func() {
@@ -450,8 +450,8 @@ func tableSync(ips []string, stmt SqlStatement) bool {
 	results := make(chan *http.Response, len(ips))
 	// 构造 post 请求参数
 	var data SyncStatement
-	data.reqId = stmt.ReqId
-	data.statement = stmt.Statement
+	data.ReqId = stmt.ReqId
+	data.Statement = stmt.Statement
 	bytesData, _ := json.Marshal(data)
 	for _, ip := range ips {
 		wg.Add(1)
