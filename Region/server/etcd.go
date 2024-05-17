@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -136,10 +135,14 @@ func (rs *RegionServer) watchRegionId() {
 					rs.regionIdChannel <- rs.RegionId //写入通道
 				}
 				// 将新 regionId 写入 config 文件
+				viper.Reset()
 				viper.SetConfigName("config")
 				viper.SetConfigType("yaml")
 				viper.AddConfigPath("./server")
-				viper.Set("server.regionId", rs.RegionId)
+				viper.Set("server.region", rs.RegionId)
+				if err := viper.WriteConfig(); err != nil {
+					panic(err)
+				}
 				// 更改regionId的情况不涉及表操作
 			}
 		}
@@ -169,6 +172,7 @@ func (rs *RegionServer) watchState() {
 		if value == "0" {
 			rs.IsMaster = true
 			fmt.Println("The server is a master server")
+			go rs.initVisit()
 		}
 		rs.stateWatcher = clientv3.NewWatcher(rs.etcdClient) //建立监听
 		stateChannel := rs.stateWatcher.Watch(context.Background(), stateKey)
@@ -248,15 +252,15 @@ func (rs *RegionServer) initVisit() {
 // 从 etcd 中获取该 region 现存的 tables
 func (rs *RegionServer) getTables() {
 	// 从 /table/tableName - regionId 中读取当前 server 中已经存在的表并置 visit 值为 0
-	resp, err := rs.etcdClient.Get(rs.etcdClient.Ctx(), "/"+tablePrefix, clientv3.WithPrefix())
+	keyPrefix := "/" + tablePrefix + "/"
+	resp, err := rs.etcdClient.Get(rs.etcdClient.Ctx(), keyPrefix, clientv3.WithPrefix())
 	if err != nil {
 		slog.Error(fmt.Sprintf("%s\n", err))
 	} else {
 		for _, kv := range resp.Kvs {
 			if string(kv.Value) == strconv.Itoa(rs.RegionId) { //是当前region里的table
-				parts := strings.Split("/", string(kv.Key))
-				tableName := parts[len(parts)-1] // 截取 tableName
-				rs.Visits[tableName] = 0         // reset
+				tableName := string(kv.Key[len(keyPrefix):]) // 截取 tableName
+				rs.Visits[tableName] = 0                     // reset
 				fmt.Print(tableName + " ")
 			}
 		}
