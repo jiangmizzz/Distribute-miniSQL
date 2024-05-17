@@ -1,0 +1,10 @@
+#!/bin/bash
+find . -type d -name "*.etcd" -exec rm -r {} +
+sleep 1
+
+output=$(etcdctl --endpoints=http://$2:2379 member add etcd-$1 --peer-urls=http://$1:2380 | grep "ETCD_INITIAL_CLUSTER=")
+cluster=$(echo $output | awk -F'"' '{print $2}')
+
+# for /f tokens^=2^ delims^=^" %%i in ('.\etcdctl.exe --endpoints=http://%2:2379 member add etcd-%1 --peer-urls=http://%1:2380 ^| find "ETCD_INITIAL_CLUSTER="') do set cluster=%%i
+
+etcd -name etcd-$1 -listen-peer-urls http://0.0.0.0:2380 -listen-client-urls http://0.0.0.0:2379 -advertise-client-urls http://$1:2379 -initial-advertise-peer-urls http://$1:2380 -initial-cluster $cluster -initial-cluster-state existing
