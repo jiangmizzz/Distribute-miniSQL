@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"os/exec"
+	"strconv"
+	"sync"
+
 	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
 	"github.com/spf13/viper"
-	"net/http"
-	"os/exec"
-	"sync"
 )
 
 // 消息队列 当执行表迁移时开启，用于记录增量更新的 sql 语句
@@ -210,7 +212,7 @@ func WriteHandler(c *gin.Context) {
 		})
 	}
 	// 向 slave 同步 commit 信号
-	for ip := range slaves {
+	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
 		data := make(map[string]interface{})
 		data["reqId"] = stmt.ReqId
@@ -286,8 +288,8 @@ func CreateHandler(c *gin.Context) {
 			Data:    "null",
 		})
 
-		var regionId = server.Rs.RegionId
-		server.Rs.PutKey("/table/"+stmt.TableName, string(regionId))
+		var regionId = strconv.Itoa(server.Rs.RegionId)
+		server.Rs.PutKey("/table/"+stmt.TableName, regionId)
 
 	} else {
 		//同步有误，回滚操作
@@ -300,7 +302,7 @@ func CreateHandler(c *gin.Context) {
 		})
 	}
 	// 向 slave 同步 commit 信号
-	for ip := range slaves {
+	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
 		data := make(map[string]interface{})
 		data["reqId"] = stmt.ReqId
@@ -374,6 +376,7 @@ func DeleteHandler(c *gin.Context) {
 			ErrMsg:  "Write successfully",
 			Data:    "null",
 		})
+		server.Rs.DeleteKey("/table/" + stmt.TableName)
 	} else {
 		//同步有误，回滚操作
 		_ = txn.Rollback()
@@ -385,7 +388,7 @@ func DeleteHandler(c *gin.Context) {
 		})
 	}
 	// 向 slave 同步 commit 信号
-	for ip := range slaves {
+	for _, ip := range slaves {
 		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
 		data := make(map[string]interface{})
 		data["reqId"] = stmt.ReqId
