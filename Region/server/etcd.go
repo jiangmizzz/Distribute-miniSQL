@@ -271,26 +271,6 @@ func (rs *RegionServer) getCurrentIp() (string, error) {
 	return localAddr.IP.String(), nil
 }
 
-// GetNodes 获取当前 region 中的全部 slave server 的 ip
-func (rs *RegionServer) GetNodes() []string {
-	ips := make([]string, 0)
-	// /region/regionId/ip - number
-	key := fmt.Sprintf("/%s/%d", regionPrefix, rs.RegionId)
-	resp, err := rs.etcdClient.Get(rs.etcdClient.Ctx(), key, clientv3.WithPrefix())
-	if err != nil {
-		slog.Error(fmt.Sprintf("%s\n", err))
-	} else {
-		for _, kv := range resp.Kvs {
-			if string(kv.Value) != "0" {
-				parts := strings.Split("/", string(kv.Key))
-				ip := parts[len(parts)-1] // 截取 ip
-				ips = append(ips, ip)     // 添加 ip
-			}
-		}
-	}
-	return ips
-}
-
 // ExitFromEtcd 退出 etcd 集群
 func (rs *RegionServer) ExitFromEtcd() {
 	slog.Info("Stop region server...")
