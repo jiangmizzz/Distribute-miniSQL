@@ -235,6 +235,14 @@ func (m *Master) getInitInfoFromEtcd() {
 			}
 		}
 	}
+	for ip, regionID := range serverRegion {
+		if regionID != 0 { // already processed in the previous loop
+			continue
+		}
+		if _, ok := m.servers[ip]; !ok {
+			m.serverDownWhenInit(ip, regionID, false)
+		}
+	}
 
 	// get the table already in etcd
 	resp, err = m.etcdClient.Get(m.etcdClient.Ctx(), tablePrefix, clientv3.WithPrefix())
@@ -902,5 +910,8 @@ func (m *Master) Stop() {
 }
 
 func requestWrapper(ip string, path string) string {
-	return "http://" + ip + ":8080" + path
+	if !strings.Contains(ip, ":") {
+		ip += ":8080"
+	}
+	return "http://" + ip + path
 }
