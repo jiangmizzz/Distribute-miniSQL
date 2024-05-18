@@ -136,6 +136,7 @@ func (m *Master) setupRouter() *gin.Engine {
 }
 
 func (m *Master) getInitInfoFromEtcd() {
+	log.Info("Getting initial info from etcd...")
 	// get the next available region ID
 	resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), availableRegionIdPrefix)
 	if err != nil {
@@ -187,7 +188,7 @@ func (m *Master) getInitInfoFromEtcd() {
 
 	// get the server already in etcd
 	// get modified server's regionID first
-	serverRegion := make(map[string]int)
+	serverRegion := make(map[string]int) // server IP -> region ID
 	resp, err = m.etcdClient.Get(m.etcdClient.Ctx(), serverPrefix, clientv3.WithPrefix())
 	if err != nil {
 		log.Error(fmt.Sprintf("Failed to get server info: %s", color.RedString(err.Error())))
@@ -223,6 +224,16 @@ func (m *Master) getInitInfoFromEtcd() {
 			index = i
 		}
 		m.serverUpWhenInit(ip, regionID, index)
+	}
+	// then delete the down server
+	for regionID, servers := range serverIndex {
+		reorder := true
+		for ip := range servers {
+			if _, ok := m.servers[ip]; !ok {
+				m.serverDownWhenInit(ip, regionID, reorder)
+				reorder = false
+			}
+		}
 	}
 
 	// get the table already in etcd
@@ -375,6 +386,35 @@ func (m *Master) serverUp(ip string, regionID int) {
 	}
 }
 
+// reorder == true: need to reorder the region servers if necessary
+func (m *Master) serverDownWhenInit(ip string, regionID int, reorder bool) {
+	log.Info(fmt.Sprintf("Region server is already %s: %s", color.RedString("down"), color.BlueString(ip)))
+
+	// delete the server info
+	if _, err := m.etcdClient.Delete(m.etcdClient.Ctx(), serverPrefix+ip); err != nil {
+		log.Error(fmt.Sprintf("Failed to delete server info: %s", color.RedString(err.Error())))
+	}
+	// delete the region info
+	if _, err := m.etcdClient.Delete(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip); err != nil {
+		log.Error(fmt.Sprintf("Failed to delete region info: %s", color.RedString(err.Error())))
+	}
+
+	if regionID != 0 && reorder && m.regions[regionID] != nil {
+		log.Info(fmt.Sprintf("Region %s is %s...", color.BlueString(strconv.Itoa(regionID)), color.YellowString("reordering")))
+		newRegion := make([]string, 0, regionServerNum)
+		for _, s := range m.regions[regionID] {
+			if s == "" {
+				continue
+			}
+			newRegion = append(newRegion, s)
+			if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+s, strconv.Itoa(len(newRegion)-1)); err != nil {
+				log.Error(fmt.Sprintf("Failed to update region info: %s", color.RedString(err.Error())))
+			}
+		}
+		m.regions[regionID] = newRegion
+	}
+}
+
 func (m *Master) serverDown(ip string, regionID int) {
 	// check if the server is already down
 	if _, ok := m.servers[ip]; !ok {
@@ -411,7 +451,7 @@ func (m *Master) serverDown(ip string, regionID int) {
 			log.Info(fmt.Sprintf("Region %s is %s", color.YellowString(strconv.Itoa(regionID)), color.RedString("empty")))
 			delete(m.regions, regionID)
 		}
-		// delete the server info
+		// delete the region info
 		if _, err := m.etcdClient.Delete(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip); err != nil {
 			log.Error(fmt.Sprintf("Failed to delete region info: %s", color.RedString(err.Error())))
 		}
@@ -657,26 +697,17 @@ func (m *Master) loadBalance() {
 func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, error) {
 	var tables []dto.QueryTableResponse
 	for _, tableName := range tableNames {
-		// get the region stored the table
-		resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), tablePrefix+tableName)
-		if err != nil {
-			log.Error(fmt.Sprintf("Failed to get table info: %s", color.RedString(err.Error())))
-			return nil, err
-		}
 		tables = append(tables, dto.QueryTableResponse{
 			Name: tableName,
 			IP:   "",
 		})
 
 		// get the master server of the region if exist
-		if resp.Count == 0 {
+		var regionID int
+		var ok bool
+		if regionID, ok = m.tables[tableName]; !ok {
 			log.Warn(fmt.Sprintf("Table %s is not found.", color.RedString(tableName)))
 			continue
-		}
-		regionID, err := strconv.Atoi(string(resp.Kvs[0].Value[0]))
-		if err != nil {
-			log.Error(fmt.Sprintf("Failed to convert region ID: %s", color.RedString(err.Error())))
-			return nil, err
 		}
 		if len(m.regions[regionID]) == 0 || !m.checkRegionSafety(regionID) {
 			continue
