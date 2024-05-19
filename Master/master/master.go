@@ -92,6 +92,9 @@ func (m *Master) Start() {
 	// watch for new table
 	go m.watchTable()
 
+	// get the server already in etcd
+	m.getInitInfoFromEtcd()
+
 	// start the backend server
 	router := m.setupRouter()
 	m.server = &http.Server{
@@ -104,9 +107,6 @@ func (m *Master) Start() {
 			log.Error(fmt.Sprintf("Failed to run server: %s", color.RedString(err.Error())))
 		}
 	}()
-
-	// get the server already in etcd
-	m.getInitInfoFromEtcd()
 
 	// set ticker to get the visit times of each table
 	m.ticker = time.NewTicker(loadBalanceCycle * time.Minute)
