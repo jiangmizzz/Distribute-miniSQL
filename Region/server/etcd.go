@@ -148,6 +148,10 @@ func (rs *RegionServer) watchRegionId() {
 					slog.Error(fmt.Sprintf("Format of regionId is wrong! now: %s"))
 				}
 				if rs.RegionId != newId { //regionId 更新
+					if newId == 0 {
+						//regionId 被强行置idle状态，删除所有的表
+						database.ResetDB()
+					}
 					fmt.Printf("RegionId switched:  %d --> %d\n", rs.RegionId, newId)
 					rs.RegionId = newId
 					rs.regionIdChannel <- rs.RegionId //写入通道

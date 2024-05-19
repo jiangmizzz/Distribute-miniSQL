@@ -44,3 +44,35 @@ func InitDB() *sql.DB {
 		return conn
 	}
 }
+func ResetDB() {
+	// List all tables in the schema
+	rows, err := Mysql.Query("SHOW TABLES")
+	if err != nil {
+		fmt.Println("Error querying tables:", err)
+		return
+	}
+	defer rows.Close()
+
+	// Iterate over the rows and drop each table
+	for rows.Next() {
+		var tableName string
+		err := rows.Scan(&tableName)
+		if err != nil {
+			fmt.Println("Error scanning table name:", err)
+			return
+		}
+		_, err = Mysql.Exec("DROP TABLE IF EXISTS " + tableName)
+		if err != nil {
+			fmt.Println("Error dropping table:", err)
+			return
+		}
+		fmt.Printf("Dropped table: %s\n", tableName)
+	}
+
+	if err := rows.Err(); err != nil {
+		fmt.Println("Error retrieving rows:", err)
+		return
+	}
+
+	fmt.Println("All tables dropped successfully.")
+}
