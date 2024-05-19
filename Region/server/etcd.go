@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	etcdEndpoints = "http://120.27.140.232:2379" // 现有集群中的节点地址
-	serverPrefix  = "server"                     // etcd key prefix for new region server
-	regionPrefix  = "region"                     // etcd key prefix for new region
-	tablePrefix   = "table"                      // etcd key prefix for new table
-	visitPrefix   = "visit"                      // etcd key prefix for visit
+	etcdEndpoints  = "http://120.27.140.232:2379" // 现有集群中的节点地址
+	discoverPrefix = "discovery"                  //服务发现前缀
+	serverPrefix   = "server"                     // etcd key prefix for new region server
+	regionPrefix   = "region"                     // etcd key prefix for new region
+	tablePrefix    = "table"                      // etcd key prefix for new table
+	visitPrefix    = "visit"                      // etcd key prefix for visit
 )
 
 var (
@@ -111,7 +112,7 @@ func (rs *RegionServer) registerServer() {
 	currentAddr = currentIp + ":" + strconv.Itoa(Port) // 获取当前 ip:port
 	fmt.Println(currentAddr)
 	//服务发现
-	serviceKey := fmt.Sprintf("/%s/discovery/%s", serverPrefix, currentAddr)
+	serviceKey := fmt.Sprintf("/%s/%s", discoverPrefix, currentAddr)
 
 	//写入 /server/find/ip:port - regionId 键值对
 	_, err := rs.etcdClient.Put(rs.etcdClient.Ctx(), serviceKey, strconv.Itoa(rs.RegionId), clientv3.WithLease(rs.lease.ID)) //持有租约
