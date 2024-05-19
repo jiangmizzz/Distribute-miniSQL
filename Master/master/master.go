@@ -268,8 +268,7 @@ func (m *Master) watchRegionServer() {
 	log.Info("Watching for new region server...")
 	watcher := clientv3.NewWatcher(m.etcdClient)
 	defer func(watcher clientv3.Watcher) {
-		err := watcher.Close()
-		if err != nil {
+		if err := watcher.Close(); err != nil {
 			log.Error(fmt.Sprintf("Failed to close etcd watcher: %s", color.RedString(err.Error())))
 			return
 		}
@@ -328,6 +327,12 @@ func (m *Master) serverUpWhenInit(ip string, regionID int, index int) {
 	}
 	if index == -1 {
 		m.regions[regionID] = append(m.regions[regionID], ip)
+		if regionID != 0 {
+			// update the region info
+			if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.Itoa(len(m.regions[regionID])-1)); err != nil {
+				log.Error(fmt.Sprintf("Failed to update region info: %s", color.RedString(err.Error())))
+			}
+		}
 	} else {
 		m.regions[regionID][index] = ip
 	}
