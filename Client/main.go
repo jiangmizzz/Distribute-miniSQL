@@ -101,7 +101,7 @@ func main() { //下面开始写分布式数据库的客户端的代码（使用�
 			continue
 		}
 
-		inputLines = strings.ToUpper(inputLines)//将输入的SQL语句转换为大写
+		inputLines = strings.ToUpper(inputLines) //将输入的SQL语句转换为大写
 
 		tables, sqlType := parseSQL(inputLines)
 
@@ -134,7 +134,7 @@ func main() { //下面开始写分布式数据库的客户端的代码（使用�
 				fmt.Println("Failed to create table")
 			} else {
 				tableIPs[tables[0]] = ip
-				flag,err := regionCreateTable(tables[0], inputLines)
+				flag, err := regionCreateTable(tables[0], inputLines)
 				if flag {
 					fmt.Println("Table created")
 				} else {
@@ -147,7 +147,7 @@ func main() { //下面开始写分布式数据库的客户端的代码（使用�
 				fmt.Println("Invalid request")
 				break
 			}
-			ip,err := deleteTable(tables[0])
+			ip, err := deleteTable(tables[0])
 			if err != nil {
 				fmt.Println("Delete table failed:", err)
 				break
@@ -156,7 +156,7 @@ func main() { //下面开始写分布式数据库的客户端的代码（使用�
 				fmt.Println("Failed to delete table")
 			} else {
 				tableIPs[tables[0]] = ip
-				flag,err := regionDeleteTable(tables[0], inputLines)
+				flag, err := regionDeleteTable(tables[0], inputLines)
 				if flag {
 					fmt.Println("Table deleted")
 				} else {
@@ -263,7 +263,7 @@ func main() { //下面开始写分布式数据库的客户端的代码（使用�
 				table = strings.TrimSpace(table)
 				fields := []string{}
 
-				if(selectFields[0] == "*") { // 找出该表的字段
+				if selectFields[0] == "*" { // 找出该表的字段
 					fields = append(fields, "*")
 				} else {
 					for _, field := range selectFields {
@@ -379,64 +379,64 @@ func showTables() []string {
 }
 
 // 建表（master）
-func newTable(tableName string) (string,error) {
+func newTable(tableName string) (string, error) {
 	resp, err := http.Get("http://" + masterIP + ":8080/api/table/new?tableName=" + tableName)
 	if err != nil {
-		return "",err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	//针对resp.StatusCode的不同，而做不同的处理（200/400/409/500/503）
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusBadRequest {
-			return "",fmt.Errorf("invalid request")
+			return "", fmt.Errorf("invalid request")
 		} else if resp.StatusCode == http.StatusConflict {
-			return "",fmt.Errorf("table already exist")
+			return "", fmt.Errorf("table already exist")
 		} else if resp.StatusCode == http.StatusInternalServerError {
-			return "",fmt.Errorf("failed to create table")
+			return "", fmt.Errorf("failed to create table")
 		} else if resp.StatusCode == http.StatusServiceUnavailable {
-			return "",fmt.Errorf("no enough region servers")
+			return "", fmt.Errorf("no enough region servers")
 		}
 	}
 
 	var response dto.ResponseType[dto.IPResponse]
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return "",err
+		return "", err
 	}
 	if !response.Success {
-		return "",fmt.Errorf(response.ErrMsg)
+		return "", fmt.Errorf(response.ErrMsg)
 	}
 
 	return response.Data.IP, nil
 }
 
 // 删表（master），GET方法请求参数在url中
-func deleteTable(tableName string) (string,error) {
+func deleteTable(tableName string) (string, error) {
 	resp, err := http.Get("http://" + masterIP + ":8080/api/table/delete?tableName=" + tableName)
 	if err != nil {
-		return "",err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	//针对resp.StatusCode的不同，而做不同的处理（200/400/409/500/503）
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusBadRequest {
-			return "",fmt.Errorf("invalid request")
+			return "", fmt.Errorf("invalid request")
 		} else if resp.StatusCode == http.StatusConflict {
-			return "",fmt.Errorf("table doesn't exist")
+			return "", fmt.Errorf("table doesn't exist")
 		} else if resp.StatusCode == http.StatusInternalServerError {
-			return "",fmt.Errorf("failed to delete table")
+			return "", fmt.Errorf("failed to delete table")
 		} else if resp.StatusCode == http.StatusServiceUnavailable {
-			return "",fmt.Errorf("no enough region servers")
+			return "", fmt.Errorf("no enough region servers")
 		}
 	}
 
 	var response dto.ResponseType[dto.IPResponse]
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return "",err
+		return "", err
 	}
 	if !response.Success {
-		return "",fmt.Errorf(response.ErrMsg)
+		return "", fmt.Errorf(response.ErrMsg)
 	}
 
 	return response.Data.IP, nil
@@ -514,7 +514,7 @@ func readSQL(tableName string, sql string) (cols []string, rows [][]string, stat
 	for i := 0; i < MaxRetries; i++ { //最多重试次数
 		resp, err := client.Post("http://"+tableIPs[tableName]+"/api/sql/read", "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			if err, ok := err.(net.Error); ok && err.Timeout() { // http请求超时,重发
+			if err, ok := err.(net.Error); ok && err != nil { // http请求超时,重发
 				// 重新获取 IP 并重试请求的逻辑
 				getTableIPs([]string{tableName})
 				if tableIPs[tableName] == "" { //如果还是查不到ip，说明这个表不存在
@@ -558,7 +558,7 @@ func readSQL(tableName string, sql string) (cols []string, rows [][]string, stat
 		}
 		cols = response.Data.Cols
 		rows = response.Data.Rows
-		break;
+		break
 	}
 	return cols, rows, true, nil
 }
@@ -582,10 +582,10 @@ func writeSQL(tableName string, sql string) (bool, error) {
 		Timeout: MaxWaitTime,
 	}
 
-	for i := 0; i<MaxRetries; i++ { //最多重试次数
+	for i := 0; i < MaxRetries; i++ { //最多重试次数
 		resp, err := client.Post("http://"+tableIPs[tableName]+"/api/sql/write", "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			if err, ok := err.(net.Error); ok && err.Timeout() { // http请求超时,重发
+			if err, ok := err.(net.Error); ok && err != nil { // http请求超时,重发
 				// 重新获取 IP 并重试请求的逻辑
 				getTableIPs([]string{tableName})
 				if tableIPs[tableName] == "" { //如果还是查不到ip，说明这个表不存在
@@ -629,18 +629,18 @@ func writeSQL(tableName string, sql string) (bool, error) {
 }
 
 // 建表（region），POST方法
-func regionCreateTable(tableName string, sql string) (bool,error) {
+func regionCreateTable(tableName string, sql string) (bool, error) {
 	unixNanoTimeString := fmt.Sprintf("%d", time.Now().UnixNano()) //获取当前时间戳
 	jsonBody, err := json.Marshal(dto.CreateSQLRequest{ReqId: ip + unixNanoTimeString, TableName: tableName, Statement: sql})
 	if err != nil {
-		return false,err
+		return false, err
 	}
 
 	//检查缓存tableIPs中是否有这个表的ip，如果有，直接发送请求，如果没有，先调用getTableIPs获取
 	if tableIPs[tableName] == "" {
 		getTableIPs([]string{tableName})
 		if tableIPs[tableName] == "" { //如果还是查不到ip，说明这个表不存在
-			return false,fmt.Errorf("table doesn't exist")
+			return false, fmt.Errorf("table doesn't exist")
 		}
 	}
 
@@ -648,10 +648,10 @@ func regionCreateTable(tableName string, sql string) (bool,error) {
 		Timeout: MaxWaitTime,
 	}
 
-	for i := 0; i<MaxRetries; i++ { //最多重试次数
+	for i := 0; i < MaxRetries; i++ { //最多重试次数
 		resp, err := client.Post("http://"+tableIPs[tableName]+"/api/sql/create", "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			if err, ok := err.(net.Error); ok && err.Timeout() { // http请求超时,重发
+			if err, ok := err.(net.Error); ok && err != nil { // http请求超时,重发
 				// 重新获取 IP 并重试请求的逻辑
 				getTableIPs([]string{tableName})
 				if tableIPs[tableName] == "" { //如果还是查不到ip，说明这个表不存在
@@ -695,18 +695,18 @@ func regionCreateTable(tableName string, sql string) (bool,error) {
 }
 
 // 删表（region），POST方法
-func regionDeleteTable(tableName string, sql string) (bool,error) {
+func regionDeleteTable(tableName string, sql string) (bool, error) {
 	unixNanoTimeString := fmt.Sprintf("%d", time.Now().UnixNano()) //获取当前时间戳
 	jsonBody, err := json.Marshal(dto.CreateSQLRequest{ReqId: ip + unixNanoTimeString, TableName: tableName, Statement: sql})
 	if err != nil {
-		return false,err
+		return false, err
 	}
 
 	//检查缓存tableIPs中是否有这个表的ip，如果有，直接发送请求，如果没有，先调用getTableIPs获取
 	if tableIPs[tableName] == "" {
 		getTableIPs([]string{tableName})
 		if tableIPs[tableName] == "" { //如果还是查不到ip，说明这个表不存在
-			return false,fmt.Errorf("table doesn't exist")
+			return false, fmt.Errorf("table doesn't exist")
 		}
 	}
 
@@ -714,10 +714,10 @@ func regionDeleteTable(tableName string, sql string) (bool,error) {
 		Timeout: MaxWaitTime,
 	}
 
-	for i := 0; i<MaxRetries; i++ { //最多重试次数
+	for i := 0; i < MaxRetries; i++ { //最多重试次数
 		resp, err := client.Post("http://"+tableIPs[tableName]+"/api/sql/delete", "application/json", bytes.NewReader(jsonBody))
 		if err != nil {
-			if err, ok := err.(net.Error); ok && err.Timeout() { // http请求超时,重发
+			if err, ok := err.(net.Error); ok && err != nil { // http请求超时,重发
 				// 重新获取 IP 并重试请求的逻辑
 				getTableIPs([]string{tableName})
 				if tableIPs[tableName] == "" { //如果还是查不到ip，说明这个表不存在
@@ -853,7 +853,7 @@ func parseSQL(sql string) ([]string, int) {
 	} else if words[0] == "SELECT" {
 		sqlType = SELECT_SINGLE
 		for i := 1; i < len(words); i++ {
-			if words[i] == "FROM" {;
+			if words[i] == "FROM" {
 				//从FROM后面的表名开始，直到遇到WHERE或者words结束
 				for j := i + 1; j < len(words); j++ {
 					if words[j] == "WHERE" {
