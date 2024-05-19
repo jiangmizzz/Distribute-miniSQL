@@ -672,7 +672,7 @@ func (m *Master) loadBalance() {
 			return
 		}
 		// move the table
-		log.Info(fmt.Sprintf("Table %s: %stimes is moved:\t%s --> %s", color.BlueString(tableName), color.BlueString("%d", m.visitNum[maxRegionID][tableName]), color.RedString("%d", maxRegionID), color.GreenString("%d", minRegionID)))
+		log.Info(fmt.Sprintf("Table %s: %s times is moved:\t%s --> %s", color.BlueString(tableName), color.BlueString("%d", m.visitNum[maxRegionID][tableName]), color.RedString("%d", maxRegionID), color.GreenString("%d", minRegionID)))
 
 		// make a request to the region server to move the table
 		postBody, err := json.Marshal(dto.MoveTableRequest{
