@@ -186,6 +186,7 @@ func WriteHandler(c *gin.Context) {
 	}
 	// 执行成功，获取 slave IP，准备同步
 	fmt.Println("Execution success!")
+	fmt.Println(stmt.Statement)
 	slaves := server.Rs.GetSlaves()
 	updateVisits(stmt.TableName, 2*(len(slaves)+1)) // 更新访问量(+2*len(slaves))
 	// 表同步
@@ -274,6 +275,7 @@ func CreateHandler(c *gin.Context) {
 	}
 	// 执行成功，获取 slave IP，准备同步
 	fmt.Println("Execution success!")
+	fmt.Println(stmt.Statement)
 	slaves := server.Rs.GetSlaves()
 	// 表同步
 	syncRes := tableSync(slaves, stmt)
@@ -364,6 +366,7 @@ func DeleteHandler(c *gin.Context) {
 
 	// 执行成功，获取 slave IP，准备同步
 	fmt.Println("Execution success!")
+	fmt.Println(stmt.Statement)
 	slaves := server.Rs.GetSlaves()
 	// 表同步
 	syncRes := tableSync(slaves, stmt)

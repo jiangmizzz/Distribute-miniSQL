@@ -68,10 +68,10 @@ func SyncHandler(c *gin.Context) {
 	// 执行出错
 	_, err = txn.Exec(stmt.Statement)
 	if err != nil {
-		c.JSON(http.StatusOK, dto.ResponseType[string]{
+		c.JSON(http.StatusInternalServerError, dto.ResponseType[string]{
 			Success: true,
 			Data:    "null",
-			ErrCode: "400",
+			ErrCode: "500",
 			ErrMsg:  err.Error(),
 		})
 		return
