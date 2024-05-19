@@ -247,7 +247,7 @@ func (rs *RegionServer) initVisit() {
 	rs.getTables()
 	//每隔 10s 上传一次访问量，然后刷新一遍 map
 	if rs.ticker == nil {
-		rs.ticker = time.Tick(10 * time.Second)
+		rs.ticker = time.Tick(120 * time.Second)
 	}
 	for range rs.ticker {
 		if !rs.IsMaster {
