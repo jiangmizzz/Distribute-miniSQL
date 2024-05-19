@@ -213,7 +213,7 @@ func WriteHandler(c *gin.Context) {
 	}
 	// 向 slave 同步 commit 信号
 	for _, ip := range slaves {
-		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
+		url := fmt.Sprintf("http://%s/api/table/commit", ip)
 		data := CommitStatement{
 			ReqId:    stmt.ReqId,
 			IsCommit: syncRes,
@@ -304,7 +304,7 @@ func CreateHandler(c *gin.Context) {
 	}
 	// 向 slave 同步 commit 信号
 	for _, ip := range slaves {
-		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
+		url := fmt.Sprintf("http://%s/api/table/commit", ip)
 		data := CommitStatement{
 			ReqId:    stmt.ReqId,
 			IsCommit: syncRes,
@@ -391,7 +391,7 @@ func DeleteHandler(c *gin.Context) {
 	}
 	// 向 slave 同步 commit 信号
 	for _, ip := range slaves {
-		url := fmt.Sprintf("http://%s:%s/api/table/commit", ip, "8080")
+		url := fmt.Sprintf("http://%s/api/table/commit", ip)
 		data := CommitStatement{
 			ReqId:    stmt.ReqId,
 			IsCommit: syncRes,
@@ -455,7 +455,7 @@ func tableSync(ips []string, stmt SqlStatement) bool {
 	bytesData, _ := json.Marshal(data)
 	for _, ip := range ips {
 		wg.Add(1)
-		url := fmt.Sprintf("http://%s:%s/api/table/sync", ip, "8080")
+		url := fmt.Sprintf("http://%s/api/table/sync", ip)
 		//开启 new goroutine 发送1个请求
 		go func() {
 			defer wg.Done() //执行完成时等待-1
@@ -502,7 +502,7 @@ func MoveHandler(c *gin.Context) {
 		c.JSON(400, response)
 		return
 	}
-	cmd := exec.Command("mysqldump", viper.GetString("database.dbname"),
+	cmd := exec.Command("mysqldump", database.DBname,
 		params.TableName, "-u"+viper.GetString("database.username"),
 		"-p"+viper.GetString("database.password"), "--skip-comments")
 	stdout, err := cmd.Output()
@@ -526,7 +526,7 @@ func MoveHandler(c *gin.Context) {
 		Statements: string(stdout),
 	}
 	postBody, err := json.Marshal(receiveParams)
-	resp, err := http.Post("http://"+params.Destination+":8080/api/table/receive",
+	resp, err := http.Post("http://"+params.Destination+"/api/table/receive",
 		"application/json", bytes.NewBuffer(postBody))
 
 	if err != nil || resp.StatusCode != 200 {
@@ -548,7 +548,7 @@ func MoveHandler(c *gin.Context) {
 		}
 		messageQueue.Statements = []string{}
 		postBody, err := json.Marshal(chaseParams)
-		resp, err := http.Post("http://"+params.Destination+":8080/api/table/chase",
+		resp, err := http.Post("http://"+params.Destination+"/api/table/chase",
 			"application/json", bytes.NewBuffer(postBody))
 
 		if err != nil || resp.StatusCode != 200 {
@@ -578,7 +578,7 @@ func MoveHandler(c *gin.Context) {
 	postBody, _ = json.Marshal(chaseParams)
 	slaves := server.Rs.GetSlaves()
 	for _, slave := range slaves {
-		resp, err := http.Post("http://"+slave+":8080/api/table/slave/chase",
+		resp, err := http.Post("http://"+slave+"/api/table/slave/chase",
 			"application/json", bytes.NewBuffer(postBody))
 		if err != nil || resp.StatusCode != 200 {
 		}
@@ -606,7 +606,7 @@ func NodeSyncHandler(c *gin.Context) {
 		c.JSON(400, response)
 		return
 	}
-	cmd := exec.Command("mysqldump", viper.GetString("database.dbname"),
+	cmd := exec.Command("mysqldump", database.DBname,
 		"-u"+viper.GetString("database.username"),
 		"-p"+viper.GetString("database.password"), "--skip-comments")
 	stdout, err := cmd.Output()
@@ -628,7 +628,7 @@ func NodeSyncHandler(c *gin.Context) {
 		Statements: string(stdout),
 	}
 	postBody, err := json.Marshal(receiveParams)
-	resp, err := http.Post("http://"+params.Destination+":8080/api/table/slave/receive",
+	resp, err := http.Post("http://"+params.Destination+"/api/table/slave/receive",
 		"application/json", bytes.NewBuffer(postBody))
 
 	if err != nil || resp.StatusCode != 200 {
@@ -650,7 +650,7 @@ func NodeSyncHandler(c *gin.Context) {
 		}
 		nodeMessageQueue.Statements = []string{}
 		postBody, err := json.Marshal(chaseParams)
-		resp, err := http.Post("http://"+params.Destination+":8080/api/table/slave/chase",
+		resp, err := http.Post("http://"+params.Destination+"/api/table/slave/chase",
 			"application/json", bytes.NewBuffer(postBody))
 
 		if err != nil || resp.StatusCode != 200 {
@@ -692,7 +692,7 @@ func ReceiveHandler(c *gin.Context) {
 	}
 
 	cmd := exec.Command("mysql", "-u"+viper.GetString("database.username"),
-		"-p"+viper.GetString("database.password"), viper.GetString("database.dbname"))
+		"-p"+viper.GetString("database.password"), database.DBname)
 	cmd.Stdin = bytes.NewBufferString(params.Statements)
 	err := cmd.Run()
 	if err != nil {
@@ -709,7 +709,7 @@ func ReceiveHandler(c *gin.Context) {
 	slaves := server.Rs.GetSlaves()
 	for _, slave := range slaves {
 		postBody, err := json.Marshal(params)
-		resp, err := http.Post("http://"+slave+":8080/api/table/slave/receive",
+		resp, err := http.Post("http://"+slave+"/api/table/slave/receive",
 			"application/json", bytes.NewBuffer(postBody))
 		if err != nil || resp.StatusCode != 200 {
 			response := dto.ResponseType[string]{
@@ -756,7 +756,7 @@ func ChaseHandler(c *gin.Context) {
 	slaves := server.Rs.GetSlaves()
 	for _, slave := range slaves {
 		postBody, err := json.Marshal(params)
-		resp, err := http.Post("http://"+slave+":8080/api/table/slave/chase",
+		resp, err := http.Post("http://"+slave+"/api/table/slave/chase",
 			"application/json", bytes.NewBuffer(postBody))
 		if err != nil || resp.StatusCode != 200 {
 			response := dto.ResponseType[string]{

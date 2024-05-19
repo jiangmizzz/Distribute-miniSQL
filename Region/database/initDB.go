@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-var Mysql *sql.DB
+var (
+	Mysql  *sql.DB
+	DBname string //数据表名
+)
 
 func InitDB() *sql.DB {
 	viper.SetConfigName("dbconfig")   // 配置文件名称(无扩展名)
@@ -24,9 +27,9 @@ func InitDB() *sql.DB {
 	password := viper.GetString("database.password")
 	host := viper.GetString("database.host")
 	port := viper.GetString("database.port")
-	dbname := viper.GetString("database.dbname")
+	viper.Reset()
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local", username, password, host, port, dbname)
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local", username, password, host, port, DBname)
 	if conn, err := sql.Open("mysql", dsn); err != nil {
 		panic(err.Error())
 	} else {
