@@ -26,9 +26,9 @@ import (
 const (
 	etcdEndpoints           = "http://localhost:2379"
 	availableRegionIdPrefix = "/availableRegionId/"
-	discoverPrefix          = "/server/discovery/" // etcd key prefix for discover new server
-	serverPrefix            = "/server/"           // etcd key prefix for server region ID
-	regionPrefix            = "/region/"           // etcd key prefix for new region
+	discoverPrefix          = "/discovery/" // etcd key prefix for discover new server
+	serverPrefix            = "/server/"    // etcd key prefix for server region ID
+	regionPrefix            = "/region/"    // etcd key prefix for new region
 	tablePrefix             = "/table/"
 	visitPrefix             = "/visit/"
 
