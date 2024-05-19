@@ -16,7 +16,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-sql-driver/mysql"
-	"github.com/spf13/viper"
 )
 
 // 消息队列 当执行表迁移时开启，用于记录增量更新的 sql 语句
@@ -503,8 +502,8 @@ func MoveHandler(c *gin.Context) {
 		return
 	}
 	cmd := exec.Command("mysqldump", database.DBname,
-		params.TableName, "-u"+viper.GetString("database.username"),
-		"-p"+viper.GetString("database.password"), "--skip-comments")
+		params.TableName, "-u"+database.Username,
+		"-p"+database.Password, "--skip-comments")
 	stdout, err := cmd.Output()
 
 	if err != nil {
@@ -607,8 +606,8 @@ func NodeSyncHandler(c *gin.Context) {
 		return
 	}
 	cmd := exec.Command("mysqldump", database.DBname,
-		"-u"+viper.GetString("database.username"),
-		"-p"+viper.GetString("database.password"), "--skip-comments")
+		"-u"+database.Username,
+		"-p"+database.Password, "--skip-comments")
 	stdout, err := cmd.Output()
 
 	if err != nil {
@@ -691,8 +690,8 @@ func ReceiveHandler(c *gin.Context) {
 		return
 	}
 
-	cmd := exec.Command("mysql", "-u"+viper.GetString("database.username"),
-		"-p"+viper.GetString("database.password"), database.DBname)
+	cmd := exec.Command("mysql", "-u"+database.Username,
+		"-p"+database.Password, database.DBname)
 	cmd.Stdin = bytes.NewBufferString(params.Statements)
 	err := cmd.Run()
 	if err != nil {

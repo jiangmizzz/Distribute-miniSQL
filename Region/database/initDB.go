@@ -10,8 +10,10 @@ import (
 )
 
 var (
-	Mysql  *sql.DB
-	DBname string //数据表名
+	Mysql    *sql.DB
+	DBname   string //数据表名
+	Username string
+	Password string
 )
 
 func InitDB() *sql.DB {
@@ -27,6 +29,8 @@ func InitDB() *sql.DB {
 	password := viper.GetString("database.password")
 	host := viper.GetString("database.host")
 	port := viper.GetString("database.port")
+	Username = username
+	Password = password
 	viper.Reset()
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local", username, password, host, port, DBname)

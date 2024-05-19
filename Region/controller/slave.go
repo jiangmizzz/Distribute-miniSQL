@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/spf13/viper"
 )
 
 type SyncStatement struct {
@@ -151,8 +150,8 @@ func SlaveReceiveHandler(c *gin.Context) {
 		return
 	}
 
-	cmd := exec.Command("mysql", "-u"+viper.GetString("database.username"),
-		"-p"+viper.GetString("database.password"), database.DBname)
+	cmd := exec.Command("mysql", "-u"+database.Username,
+		"-p"+database.Password, database.DBname)
 	cmd.Stdin = bytes.NewBufferString(params.Statements)
 	err := cmd.Run()
 	if err != nil {
