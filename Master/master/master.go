@@ -26,19 +26,19 @@ import (
 const (
 	etcdEndpoints           = "http://localhost:2379"
 	availableRegionIdPrefix = "/availableRegionId/"
-	discoverPrefix          = "/server/discovery/" // etcd key prefix for discover new server
-	serverPrefix            = "/server/"           // etcd key prefix for server region ID
-	regionPrefix            = "/region/"           // etcd key prefix for new region
+	discoverPrefix          = "/discovery/" // etcd key prefix for discover new server
+	serverPrefix            = "/server/"    // etcd key prefix for server region ID
+	regionPrefix            = "/region/"    // etcd key prefix for new region
 	tablePrefix             = "/table/"
 	visitPrefix             = "/visit/"
 
-	movePath = "/table/move"
-	syncPath = "/node/sync"
+	movePath = "/api/table/move"
+	syncPath = "/api/node/sync"
 
 	regionServerNum    = 3   // the number of region servers in a region
 	backupServerNum    = 2   // the number of idle servers for backup
 	regionMinServerNum = 2   // the minimum number of region servers in a region (first region)
-	loadBalanceCycle   = 5   // the cycle of load balance (minutes)
+	loadBalanceCycle   = 2   // the cycle of load balance (minutes)
 	moveThresholdHigh  = 1.2 // if a region has more than 20% of the average visit times, it is considered as a hot region
 	moveThresholdLow   = 0.8 // if a region has less than 20% of the average visit times, it is considered as a cold region
 )
@@ -92,6 +92,9 @@ func (m *Master) Start() {
 	// watch for new table
 	go m.watchTable()
 
+	// get the server already in etcd
+	m.getInitInfoFromEtcd()
+
 	// start the backend server
 	router := m.setupRouter()
 	m.server = &http.Server{
@@ -104,9 +107,6 @@ func (m *Master) Start() {
 			log.Error(fmt.Sprintf("Failed to run server: %s", color.RedString(err.Error())))
 		}
 	}()
-
-	// get the server already in etcd
-	m.getInitInfoFromEtcd()
 
 	// set ticker to get the visit times of each table
 	m.ticker = time.NewTicker(loadBalanceCycle * time.Minute)
@@ -235,6 +235,14 @@ func (m *Master) getInitInfoFromEtcd() {
 			}
 		}
 	}
+	for ip, regionID := range serverRegion {
+		if regionID != 0 { // already processed in the previous loop
+			continue
+		}
+		if _, ok := m.servers[ip]; !ok {
+			m.serverDownWhenInit(ip, regionID, false)
+		}
+	}
 
 	// get the table already in etcd
 	resp, err = m.etcdClient.Get(m.etcdClient.Ctx(), tablePrefix, clientv3.WithPrefix())
@@ -351,7 +359,7 @@ func (m *Master) serverUp(ip string, regionID int) {
 		return
 	} else {
 		if regionID != 0 && len(m.regions[regionID]) > 0 {
-			m.requestSync(ip, m.regions[regionID][0])
+			m.requestSync(m.regions[regionID][0], ip)
 		}
 
 		if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), serverPrefix+ip, strconv.Itoa(regionID)); err != nil {
@@ -469,7 +477,7 @@ func (m *Master) serverDown(ip string, regionID int) {
 				log.Error(fmt.Sprintf("Failed to update region info: %s", color.RedString(err.Error())))
 			}
 			m.regions[regionID] = append(m.regions[regionID], newServer)
-			m.requestSync(newServer, m.regions[regionID][0])
+			m.requestSync(m.regions[regionID][0], newServer)
 			log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(newServer), color.YellowString("0"), color.GreenString("%d", regionID)))
 		}
 	} else {
@@ -477,17 +485,17 @@ func (m *Master) serverDown(ip string, regionID int) {
 	}
 }
 
-func (m *Master) requestSync(ip string, master string) {
+func (m *Master) requestSync(master string, slave string) {
 	// make a request to the region server to sync the data
-	log.Info(fmt.Sprintf("Requesting region server %s to sync data", color.BlueString(ip)))
+	log.Info(fmt.Sprintf("Requesting region server %s to sync data to %s", color.BlueString(master), color.GreenString(slave)))
 	postBody, err := json.Marshal(dto.SyncDataRequest{
-		Destination: master,
+		Destination: slave,
 	})
 	if err != nil {
 		log.Error(fmt.Sprintf("Failed to marshal sync data request: %s", color.RedString(err.Error())))
 		return
 	}
-	resp, err := http.Post(requestWrapper(ip, syncPath), "application/json", strings.NewReader(string(postBody)))
+	resp, err := http.Post(requestWrapper(master, syncPath), "application/json", strings.NewReader(string(postBody)))
 	if err != nil {
 		log.Error(fmt.Sprintf("Failed to sync data: %s", color.RedString(err.Error())))
 		return
@@ -846,7 +854,7 @@ func (m *Master) checkRegionSafety(regionID int) bool {
 				return false
 			}
 			m.regions[regionID] = append(m.regions[regionID], newServer)
-			m.requestSync(newServer, m.regions[regionID][0])
+			m.requestSync(m.regions[regionID][0], newServer)
 			log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(newServer), color.YellowString("0"), color.GreenString("%d", regionID)))
 		} else {
 			log.Warn(fmt.Sprintf("Region %s has no enough servers", color.YellowString("%d", regionID)))
@@ -868,6 +876,7 @@ func (m *Master) checkRegionSafety(regionID int) bool {
 			return false
 		}
 		m.regions[regionID] = append(m.regions[regionID], newServer)
+		m.requestSync(m.regions[regionID][0], newServer)
 		log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(newServer), color.YellowString("0"), color.GreenString("%d", regionID)))
 	}
 	return true
@@ -902,5 +911,8 @@ func (m *Master) Stop() {
 }
 
 func requestWrapper(ip string, path string) string {
-	return "http://" + ip + ":8080" + path
+	if !strings.Contains(ip, ":") {
+		ip += ":8080"
+	}
+	return "http://" + ip + path
 }
