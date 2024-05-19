@@ -1,7 +1,9 @@
 package server
 
 import (
+	"Region/database"
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -21,9 +23,11 @@ const (
 )
 
 var (
-	currentIp string            // 当前的 ip 地址
-	leaseTime = 5 * time.Second // 租约有效时间
-	Rs        RegionServer      // rs实例
+	currentAddr string            // 当前的 ip:port
+	leaseTime   = 5 * time.Second // 租约有效时间
+	Port        int               // 本server监听的端口号
+	Rs          RegionServer      // rs实例
+	configFile  string            //输入配置文件名
 )
 
 type RegionServer struct {
@@ -36,6 +40,26 @@ type RegionServer struct {
 	RegionId          int              // 当前 server 所在 region 的id
 	Visits            map[string]int   // 访问量统计 tableName-count
 	ticker            <-chan time.Time //统计访问量的计时器
+}
+
+// ReadConfig 读取配置文件
+func (rs *RegionServer) ReadConfig() {
+	// 从命令行参数中指定配置文件名
+	arg := flag.String("file", "config1", "specify config file name")
+	flag.Parse()
+	configFile = *arg
+	viper.SetConfigName(configFile)
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath("./server")
+	err := viper.ReadInConfig()
+	if err != nil {
+		slog.Error("Fail to read server config file, %s", err)
+	}
+	//读取regionId, port, dbname
+	rs.RegionId = viper.GetInt("server.region")
+	Port = viper.GetInt("server.port")
+	database.DBname = viper.GetString("server.dbname")
+	viper.Reset()
 }
 
 // ConnectToEtcd 连接到 etcd 集群
@@ -79,24 +103,17 @@ func (rs *RegionServer) ConnectToEtcd() {
 // 注册 region server
 func (rs *RegionServer) registerServer() {
 	// 注册 server k-v (有租约）
-	currentIp, _ = rs.getCurrentIp() // 获取当前 ip
+	currentIp, _ := rs.getCurrentIp()
 	if currentIp == "" {
 		slog.Error("get current IP fail! Stop registering server. \n")
 		return
 	}
-	//
-	serviceKey := fmt.Sprintf("/%s/discovery/%s", serverPrefix, currentIp)
+	currentAddr = currentIp + ":" + strconv.Itoa(Port) // 获取当前 ip:port
+	fmt.Println(currentAddr)
+	//服务发现
+	serviceKey := fmt.Sprintf("/%s/discovery/%s", serverPrefix, currentAddr)
 
-	// 从本地配置文件里获取 region id
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath("./server") //文件位置
-	confErr := viper.ReadInConfig() // 查找并读取配置文件
-	if confErr != nil {
-		slog.Error(fmt.Sprintf("Error reading server config file, %v\n", confErr))
-	}
-	rs.RegionId = viper.GetInt("server.region")
-	//写入 /server/find/ip - regionId 键值对
+	//写入 /server/find/ip:port - regionId 键值对
 	_, err := rs.etcdClient.Put(rs.etcdClient.Ctx(), serviceKey, strconv.Itoa(rs.RegionId), clientv3.WithLease(rs.lease.ID)) //持有租约
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to register service: %v\n", err))
@@ -112,9 +129,9 @@ func (rs *RegionServer) registerServer() {
 	go rs.watchRegionId()
 }
 
-// 监听 /server/ip - regionId 中的 regionId 更改
+// 监听 /server/ip:port - regionId 中的 regionId 更改
 func (rs *RegionServer) watchRegionId() {
-	regionKey := fmt.Sprintf("/%s/%s", serverPrefix, currentIp)
+	regionKey := fmt.Sprintf("/%s/%s", serverPrefix, currentAddr)
 	regionChannel := rs.etcdClient.Watch(context.Background(), regionKey)
 	fmt.Println("Start watching regionId...")
 	for {
@@ -135,15 +152,17 @@ func (rs *RegionServer) watchRegionId() {
 					rs.regionIdChannel <- rs.RegionId //写入通道
 				}
 				// 将新 regionId 写入 config 文件
-				viper.Reset()
-				viper.SetConfigName("config")
+				viper.SetConfigName(configFile)
 				viper.SetConfigType("yaml")
 				viper.AddConfigPath("./server")
 				viper.Set("server.region", rs.RegionId)
+				viper.Set("server.port", Port)
+				viper.Set("server.dbname", database.DBname)
 				if err := viper.WriteConfig(); err != nil {
 					panic(err)
 				}
 				// 更改regionId的情况不涉及表操作
+				viper.Reset()
 			}
 		}
 	}
@@ -167,7 +186,7 @@ func (rs *RegionServer) watchState() {
 		if regionId == 0 {
 			continue
 		}
-		stateKey := fmt.Sprintf("/%s/%d/%s", regionPrefix, regionId, currentIp)
+		stateKey := fmt.Sprintf("/%s/%d/%s", regionPrefix, regionId, currentAddr)
 		value := rs.GetKey(stateKey)
 		if value == "0" {
 			rs.IsMaster = true

@@ -113,6 +113,7 @@ func CommitHandler(c *gin.Context) {
 	} else {
 		if stmt.IsCommit {
 			err := TxnMap[stmt.ReqId].txn.Commit()
+			reqQueue.Add(stmt.ReqId)
 			if err != nil {
 				fmt.Println("Commit error:", err)
 			}
@@ -151,7 +152,7 @@ func SlaveReceiveHandler(c *gin.Context) {
 	}
 
 	cmd := exec.Command("mysql", "-u"+viper.GetString("database.username"),
-		"-p"+viper.GetString("database.password"), viper.GetString("database.dbname"))
+		"-p"+viper.GetString("database.password"), database.DBname)
 	cmd.Stdin = bytes.NewBufferString(params.Statements)
 	err := cmd.Run()
 	if err != nil {
