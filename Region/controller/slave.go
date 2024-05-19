@@ -49,7 +49,7 @@ func SyncHandler(c *gin.Context) {
 	var txn, err = database.Mysql.Begin()
 
 	// 若当前事务超时，则撤销该操作
-	ctx, _ := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, _ := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 
 	// 事务超时后回滚
 	go func() {
