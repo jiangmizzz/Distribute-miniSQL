@@ -51,7 +51,7 @@ type Master struct {
 	etcdClient        *clientv3.Client
 	ticker            *time.Ticker
 	regions           SafeMap[int, []string]       // regionID -> array of region servers, the first one is the primary server
-	servers           SafeMap[string, struct{}]    // all region servers set
+	servers           SafeMap[string, int]         // server name -> region ID
 	tables            SafeMap[string, int]         // table name -> region ID
 	tableNum          SafeMap[int, int]            // region ID -> table number
 	visitNum          SafeMap[int, map[string]int] // region ID -> table name -> visit times
@@ -81,7 +81,7 @@ func (m *Master) Start() {
 	// initialize member variables
 	m.controller = controller.Controller{Service: m}
 	m.regions.Map = make(map[int][]string)
-	m.servers.Map = make(map[string]struct{})
+	m.servers.Map = make(map[string]int)
 	m.tables.Map = make(map[string]int)
 	m.tableNum.Map = make(map[int]int)
 	m.visitNum.Map = make(map[int]map[string]int)
@@ -296,17 +296,7 @@ func (m *Master) watchRegionServer() {
 					go m.serverUp(ip, regionID)
 				case clientv3.EventTypeDelete:
 					ip := string(event.PrevKv.Key[len(discoverPrefix):])
-					resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), serverPrefix+ip)
-					if err != nil {
-						log.Error(fmt.Sprintf("Failed to get server info: %s", color.RedString(err.Error())))
-						continue
-					}
-					regionID, err := strconv.Atoi(string(resp.Kvs[0].Value))
-					if err != nil {
-						log.Error(fmt.Sprintf("Failed to convert region ID: %s", color.RedString(err.Error())))
-						continue
-					}
-					go m.serverDown(ip, regionID)
+					go m.serverDown(ip)
 				}
 			}
 		}
@@ -320,7 +310,7 @@ func (m *Master) serverUpWhenInit(ip string, regionID int, index int) {
 		return
 	}
 	log.Info(fmt.Sprintf("Region server is already %s: %s", color.GreenString("up"), color.BlueString(ip)))
-	m.servers.Map[ip] = struct{}{}
+	m.servers.Map[ip] = regionID
 
 	// add the region server to the region array
 	if m.regions.Map[regionID] == nil { // pre-allocate the region array to speed up
@@ -365,7 +355,7 @@ func (m *Master) serverUp(ip string, regionID int) {
 		return
 	}
 	log.Info(fmt.Sprintf("Region server %s: %s", color.GreenString("up"), color.BlueString(ip)))
-	m.servers.Map[ip] = struct{}{}
+	m.servers.Map[ip] = regionID
 
 	// if the region is full, assign the server to the idle list
 	if regionID != 0 && len(m.regions.Map[regionID]) >= regionServerNum {
@@ -373,6 +363,7 @@ func (m *Master) serverUp(ip string, regionID int) {
 			log.Error(fmt.Sprintf("Failed to update server info: %s", color.RedString(err.Error())))
 		}
 		m.regions.Map[0] = append(m.regions.Map[0], ip)
+		m.servers.Map[ip] = 0
 		log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(ip), color.YellowString("%d", regionID), color.GreenString("0")))
 		return
 	} else {
@@ -441,7 +432,7 @@ func (m *Master) serverDownWhenInit(ip string, regionID int, reorder bool) {
 	}
 }
 
-func (m *Master) serverDown(ip string, regionID int) {
+func (m *Master) serverDown(ip string) {
 	m.regions.Mu.Lock()
 	defer m.regions.Mu.Unlock()
 	m.servers.Mu.Lock()
@@ -457,6 +448,7 @@ func (m *Master) serverDown(ip string, regionID int) {
 		log.Error(fmt.Sprintf("Failed to delete server info: %s", color.RedString(err.Error())))
 	}
 
+	regionID := m.servers.Map[ip]
 	if m.regions.Map[regionID] != nil {
 		for i, s := range m.regions.Map[regionID] {
 			if s == ip {
@@ -500,6 +492,7 @@ func (m *Master) serverDown(ip string, regionID int) {
 				log.Error(fmt.Sprintf("Failed to update region info: %s", color.RedString(err.Error())))
 			}
 			m.regions.Map[regionID] = append(m.regions.Map[regionID], newServer)
+			m.servers.Map[newServer] = regionID
 			m.requestSync(m.regions.Map[regionID][0], newServer)
 			log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(newServer), color.YellowString("0"), color.GreenString("%d", regionID)))
 		}
@@ -576,9 +569,11 @@ func (m *Master) tableCreate(tableName string, regionID int) {
 
 	if oldID, ok := m.tables.Map[tableName]; !ok {
 		log.Info(fmt.Sprintf("Table %s is created in region %s", color.GreenString(tableName), color.BlueString(strconv.Itoa(regionID))))
-		m.tableNum.Map[regionID]++
+		m.tableNum.Map[regionID] = m.tableNum.Map[regionID] + 1
 	} else {
 		log.Info(fmt.Sprintf("Table %s is moved:\t%s --> %s", color.BlueString(tableName), color.YellowString("%d", oldID), color.GreenString("%d", regionID)))
+		m.tableNum.Map[oldID] = m.tableNum.Map[oldID] - 1
+		m.tableNum.Map[regionID] = m.tableNum.Map[regionID] + 1
 	}
 	m.tables.Map[tableName] = regionID
 }
@@ -586,6 +581,8 @@ func (m *Master) tableCreate(tableName string, regionID int) {
 func (m *Master) tableDelete(tableName string) {
 	m.regions.Mu.Lock()
 	defer m.regions.Mu.Unlock()
+	m.servers.Mu.Lock()
+	defer m.servers.Mu.Unlock()
 	m.tables.Mu.Lock()
 	defer m.tables.Mu.Unlock()
 	m.tableNum.Mu.Lock()
@@ -617,6 +614,7 @@ func (m *Master) tableDelete(tableName string) {
 					log.Error(fmt.Sprintf("Failed to update server info: %s", color.RedString(err.Error())))
 				}
 				m.regions.Map[0] = append(m.regions.Map[0], s)
+				m.servers.Map[s] = 0
 			}
 			delete(m.regions.Map, regionID)
 			delete(m.tableNum.Map, regionID)
@@ -639,6 +637,24 @@ func (m *Master) getVisitTimes() {
 	log.Info("Getting visit times of each table...")
 	m.visitNum.Map = make(map[int]map[string]int)
 	m.regionVisitNum.Map = make(map[int]int)
+
+	// initialize the visit times of each table and each region
+	for regionID := range m.regions.Map {
+		if len(m.regions.Map[regionID]) == 0 || regionID == 0 {
+			continue
+		}
+		if m.visitNum.Map[regionID] == nil {
+			m.visitNum.Map[regionID] = make(map[string]int)
+		}
+		m.regionVisitNum.Map[regionID] = 0
+	}
+	for tableName := range m.tables.Map {
+		if len(m.regions.Map[m.tables.Map[tableName]]) == 0 {
+			continue
+		}
+		m.visitNum.Map[m.tables.Map[tableName]][tableName] = 0
+	}
+
 	resp, err := m.etcdClient.Get(m.etcdClient.Ctx(), visitPrefix, clientv3.WithPrefix())
 	if err != nil {
 		log.Error(fmt.Sprintf("Failed to get visit info: %s", color.RedString(err.Error())))
@@ -659,6 +675,7 @@ func (m *Master) getVisitTimes() {
 			continue
 		}
 		if m.visitNum.Map[regionID] == nil {
+			log.Error(fmt.Sprintf("[NEVER] Region %s is not found", color.YellowString("%d", regionID)))
 			m.visitNum.Map[regionID] = make(map[string]int)
 		}
 		m.visitNum.Map[regionID][tableName] = times
@@ -687,7 +704,7 @@ func (m *Master) loadBalance() {
 	minRegionID := 0
 	maxRegionID := 0
 	minVisitNum := math.MaxInt32
-	maxVisitNum := 0
+	maxVisitNum := math.MinInt32
 	visitAverage := 0.0
 	for regionID, num := range m.regionVisitNum.Map {
 		if len(m.regions.Map[regionID]) == 0 {
@@ -756,6 +773,8 @@ func (m *Master) loadBalance() {
 func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, error) {
 	m.regions.Mu.Lock()
 	defer m.regions.Mu.Unlock()
+	m.servers.Mu.Lock()
+	defer m.servers.Mu.Unlock()
 	m.tables.Mu.RLock()
 	defer m.tables.Mu.RUnlock()
 
@@ -785,6 +804,8 @@ func (m *Master) QueryTable(tableNames []string) ([]dto.QueryTableResponse, erro
 func (m *Master) NewTable(tableName string) (string, error) {
 	m.regions.Mu.Lock()
 	defer m.regions.Mu.Unlock()
+	m.servers.Mu.Lock()
+	defer m.servers.Mu.Unlock()
 	m.tables.Mu.RLock()
 	defer m.tables.Mu.RUnlock()
 	m.tableNum.Mu.Lock()
@@ -848,7 +869,7 @@ func (m *Master) NewTable(tableName string) (string, error) {
 }
 
 func (m *Master) createNewRegion() int {
-	// need lock: regions W, tableNum W
+	// need lock: regions W, servers W, tableNum W
 	// get the new region servers
 	var newRegionServers []string
 	var serverNum = min(regionServerNum, len(m.regions.Map[0]))
@@ -867,6 +888,7 @@ func (m *Master) createNewRegion() int {
 	m.regions.Map[regionID] = make([]string, len(newRegionServers), regionServerNum)
 	for i, ip := range newRegionServers {
 		m.regions.Map[regionID][i] = ip
+		m.servers.Map[ip] = regionID
 		if _, err := m.etcdClient.Put(m.etcdClient.Ctx(), regionPrefix+strconv.Itoa(regionID)+"/"+ip, strconv.Itoa(i)); err != nil {
 			log.Error(fmt.Sprintf("Failed to update region info: %s", color.RedString(err.Error())))
 		}
@@ -884,6 +906,8 @@ func (m *Master) createNewRegion() int {
 func (m *Master) DeleteTable(tableName string) (string, error) {
 	m.regions.Mu.Lock()
 	defer m.regions.Mu.Unlock()
+	m.servers.Mu.Lock()
+	defer m.servers.Mu.Unlock()
 	m.tables.Mu.RLock()
 	defer m.tables.Mu.RUnlock()
 
@@ -904,7 +928,7 @@ func (m *Master) DeleteTable(tableName string) (string, error) {
 
 // ensure the region has at least `regionMinServerNum` servers
 func (m *Master) checkRegionSafety(regionID int) bool {
-	// need lock: regions W
+	// need lock: regions W, servers W
 
 	if len(m.regions.Map[regionID]) == 0 {
 		log.Error(fmt.Sprintf("Region %s is not found", color.RedString("%d", regionID)))
@@ -927,6 +951,7 @@ func (m *Master) checkRegionSafety(regionID int) bool {
 				return false
 			}
 			m.regions.Map[regionID] = append(m.regions.Map[regionID], newServer)
+			m.servers.Map[newServer] = regionID
 			m.requestSync(m.regions.Map[regionID][0], newServer)
 			log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(newServer), color.YellowString("0"), color.GreenString("%d", regionID)))
 		} else {
@@ -949,6 +974,7 @@ func (m *Master) checkRegionSafety(regionID int) bool {
 			return false
 		}
 		m.regions.Map[regionID] = append(m.regions.Map[regionID], newServer)
+		m.servers.Map[newServer] = regionID
 		m.requestSync(m.regions.Map[regionID][0], newServer)
 		log.Info(fmt.Sprintf("Server %s is reassigned:\t%s --> %s", color.BlueString(newServer), color.YellowString("0"), color.GreenString("%d", regionID)))
 	}
