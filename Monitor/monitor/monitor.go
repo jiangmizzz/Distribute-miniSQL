@@ -1,18 +1,20 @@
 package monitor
 
 import (
+	. "Monitor/utils"
 	"fmt"
 	"github.com/fatih/color"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/v3"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	etcdEndpoints = "http://120.27.140.232:2379"
+	etcdEndpoints = "http://localhost:2379"
 	serverPrefix  = "/server/" // etcd key prefix for server region ID
 	regionPrefix  = "/region/" // etcd key prefix for new region
 	tablePrefix   = "/table/"
@@ -23,10 +25,10 @@ const (
 
 type Monitor struct {
 	etcdClient *clientv3.Client
-	regions    map[int][]string    // regionID -> array of region servers, the first one is the primary server
-	idleServer map[string]struct{} // idle region servers set
-	tables     map[int][]string    // region ID -> array of table names
-	visitNum   map[string]int      // table name -> visit times
+	regions    SafeMap[int, []string]    // regionID -> array of region servers, the first one is the primary server
+	idleServer SafeMap[string, struct{}] // idle region servers set
+	tables     SafeMap[int, []string]    // region ID -> array of table names
+	visitNum   SafeMap[string, int]      // table name -> visit times
 }
 
 func (m *Monitor) Start() {
@@ -42,10 +44,10 @@ func (m *Monitor) Start() {
 	m.etcdClient = cli
 
 	// initialize member variables
-	m.regions = make(map[int][]string)
-	m.idleServer = make(map[string]struct{})
-	m.tables = make(map[int][]string)
-	m.visitNum = make(map[string]int)
+	m.regions.Map = make(map[int][]string)
+	m.idleServer.Map = make(map[string]struct{})
+	m.tables.Map = make(map[int][]string)
+	m.visitNum.Map = make(map[string]int)
 
 	// watch server and region
 	go m.watchServer()
@@ -129,6 +131,9 @@ func (m *Monitor) watchServer() {
 }
 
 func (m *Monitor) serverUp(kv *mvccpb.KeyValue) {
+	m.idleServer.Mu.Lock()
+	defer m.idleServer.Mu.Unlock()
+
 	ip := string(kv.Key[len(serverPrefix):])
 	regionID, err := strconv.Atoi(string(kv.Value))
 	if err != nil {
@@ -136,15 +141,18 @@ func (m *Monitor) serverUp(kv *mvccpb.KeyValue) {
 		return
 	}
 	if regionID == 0 {
-		m.idleServer[ip] = struct{}{}
+		m.idleServer.Map[ip] = struct{}{}
 	} else {
-		delete(m.idleServer, ip)
+		delete(m.idleServer.Map, ip)
 	}
 }
 
 func (m *Monitor) serverDown(kv *mvccpb.KeyValue) {
+	m.idleServer.Mu.Lock()
+	defer m.idleServer.Mu.Unlock()
+
 	ip := string(kv.Key[len(serverPrefix):])
-	delete(m.idleServer, ip)
+	delete(m.idleServer.Map, ip)
 }
 
 func (m *Monitor) watchRegion() {
@@ -195,27 +203,38 @@ func (m *Monitor) parseRegion(kv *mvccpb.KeyValue) (int, string, int, error) {
 }
 
 func (m *Monitor) regionUp(kv *mvccpb.KeyValue) {
+	m.regions.Mu.Lock()
+	defer m.regions.Mu.Unlock()
+
 	regionID, ip, index, err := m.parseRegion(kv)
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to parse region info: %s", color.RedString(err.Error())))
 		return
 	}
-	if _, ok := m.regions[regionID]; !ok {
-		m.regions[regionID] = make([]string, regionServerNum)
+	if _, ok := m.regions.Map[regionID]; !ok {
+		m.regions.Map[regionID] = make([]string, regionServerNum)
 	}
-	m.regions[regionID][index] = ip
+	if len(m.regions.Map[regionID]) <= index {
+		newArray := make([]string, index+1)
+		copy(newArray, m.regions.Map[regionID])
+		m.regions.Map[regionID] = newArray
+	}
+	m.regions.Map[regionID][index] = ip
 }
 
 func (m *Monitor) regionDown(kv *mvccpb.KeyValue) {
+	m.regions.Mu.Lock()
+	defer m.regions.Mu.Unlock()
+
 	regionID, _, index, err := m.parseRegion(kv)
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to parse region info: %s", color.RedString(err.Error())))
 		return
 	}
-	for i := index; i < regionServerNum-1; i++ {
-		m.regions[regionID][i] = m.regions[regionID][i+1]
+	m.regions.Map[regionID] = append(m.regions.Map[regionID][:index], m.regions.Map[regionID][index+1:]...)
+	if len(m.regions.Map[regionID]) == 0 {
+		delete(m.regions.Map, regionID)
 	}
-	m.regions[regionID][regionServerNum-1] = ""
 }
 
 func (m *Monitor) watchTable() {
@@ -246,28 +265,34 @@ func (m *Monitor) watchTable() {
 }
 
 func (m *Monitor) tableUp(kv *mvccpb.KeyValue) {
+	m.tables.Mu.Lock()
+	defer m.tables.Mu.Unlock()
+
 	tableName := string(kv.Key[len(tablePrefix):])
 	regionID, err := strconv.Atoi(string(kv.Value))
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to convert region ID: %s", color.RedString(err.Error())))
 		return
 	}
-	if _, ok := m.tables[regionID]; !ok {
-		m.tables[regionID] = make([]string, 0)
+	if _, ok := m.tables.Map[regionID]; !ok {
+		m.tables.Map[regionID] = make([]string, 0)
 	}
-	m.tables[regionID] = append(m.tables[regionID], tableName)
+	m.tables.Map[regionID] = append(m.tables.Map[regionID], tableName)
 }
 
 func (m *Monitor) tableDown(kv *mvccpb.KeyValue) {
+	m.tables.Mu.Lock()
+	defer m.tables.Mu.Unlock()
+
 	tableName := string(kv.Key[len(tablePrefix):])
 	regionID, err := strconv.Atoi(string(kv.Value))
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to convert region ID: %s", color.RedString(err.Error())))
 		return
 	}
-	for i, name := range m.tables[regionID] {
+	for i, name := range m.tables.Map[regionID] {
 		if name == tableName {
-			m.tables[regionID] = append(m.tables[regionID][:i], m.tables[regionID][i+1:]...)
+			m.tables.Map[regionID] = append(m.tables.Map[regionID][:i], m.tables.Map[regionID][i+1:]...)
 			break
 		}
 	}
@@ -301,29 +326,49 @@ func (m *Monitor) watchVisit() {
 }
 
 func (m *Monitor) visitUp(kv *mvccpb.KeyValue) {
+	m.visitNum.Mu.Lock()
+	defer m.visitNum.Mu.Unlock()
+
 	tableName := string(kv.Key[len(visitPrefix):])
 	visit, err := strconv.Atoi(string(kv.Value))
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed to convert visit times: %s", color.RedString(err.Error())))
 		return
 	}
-	m.visitNum[tableName] = visit
+	m.visitNum.Map[tableName] = visit
 }
 
 func (m *Monitor) visitDown(kv *mvccpb.KeyValue) {
+	m.visitNum.Mu.Lock()
+	defer m.visitNum.Mu.Unlock()
+
 	tableName := string(kv.Key[len(visitPrefix):])
-	delete(m.visitNum, tableName)
+	delete(m.visitNum.Map, tableName)
 }
 
 func (m *Monitor) renderInfo() {
+	m.regions.Mu.Lock()
+	defer m.regions.Mu.Unlock()
+	m.idleServer.Mu.Lock()
+	defer m.idleServer.Mu.Unlock()
+	m.tables.Mu.Lock()
+	defer m.tables.Mu.Unlock()
+	m.visitNum.Mu.Lock()
+	defer m.visitNum.Mu.Unlock()
+
 	// clear the screen
 	fmt.Print("\033[H\033[2J")
 
 	// render region info
 	fmt.Println(color.CyanString("[Region]"))
-	for regionID, servers := range m.regions {
+	regionOrder := sort.IntSlice(make([]int, 0, len(m.regions.Map)))
+	for regionID := range m.regions.Map {
+		regionOrder = append(regionOrder, regionID)
+	}
+	sort.Sort(regionOrder)
+	for _, regionID := range regionOrder {
 		fmt.Printf(color.BlueString("Region %d:\t", regionID))
-		for i, server := range servers {
+		for i, server := range m.regions.Map[regionID] {
 			if i == 0 {
 				fmt.Printf(color.GreenString("%s", server))
 			} else {
@@ -331,21 +376,35 @@ func (m *Monitor) renderInfo() {
 			}
 		}
 		fmt.Println()
+
 	}
 	fmt.Println()
 	// render idle server info
 	fmt.Println(color.CyanString("[Idle Server]"))
-	for ip := range m.idleServer {
-		fmt.Printf("%s\t", color.GreenString(ip))
+	idleServerOrder := sort.StringSlice(make([]string, 0, len(m.idleServer.Map)))
+	for ip := range m.idleServer.Map {
+		idleServerOrder = append(idleServerOrder, ip)
 	}
-	fmt.Println()
+	sort.Sort(idleServerOrder)
+	for _, ip := range idleServerOrder {
+		fmt.Printf("%s\t", color.GreenString(ip))
+
+	}
+	if len(m.idleServer.Map) > 0 {
+		fmt.Println()
+	}
 	fmt.Println()
 	// render table info
 	fmt.Println(color.CyanString("[Table]"))
-	for regionID, _ := range m.regions {
+	for _, regionID := range regionOrder {
 		fmt.Printf(color.BlueString("Region %d:\t", regionID))
-		for _, table := range m.tables[regionID] {
-			fmt.Printf("%s(%d)\t", color.MagentaString("%s", table), m.visitNum[table])
+		tableOrder := sort.StringSlice(make([]string, 0, len(m.tables.Map[regionID])))
+		for _, table := range m.tables.Map[regionID] {
+			tableOrder = append(tableOrder, table)
+		}
+		sort.Sort(tableOrder)
+		for _, table := range tableOrder {
+			fmt.Printf("%s(%d)\t", color.MagentaString("%s", table), m.visitNum.Map[table])
 		}
 		fmt.Println()
 	}
