@@ -25,6 +25,7 @@ func corsMiddleware() gin.HandlerFunc {
 }
 
 func SetupRouter() *gin.Engine {
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
 	// 应用CORS中间件
