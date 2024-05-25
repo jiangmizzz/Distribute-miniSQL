@@ -231,7 +231,11 @@ func (m *Monitor) regionDown(kv *mvccpb.KeyValue) {
 		slog.Error(fmt.Sprintf("Failed to parse region info: %s", color.RedString(err.Error())))
 		return
 	}
-	m.regions.Map[regionID] = append(m.regions.Map[regionID][:index], m.regions.Map[regionID][index+1:]...)
+	if index == 0 {
+		m.regions.Map[regionID] = m.regions.Map[regionID][1:]
+	} else {
+		m.regions.Map[regionID] = append(m.regions.Map[regionID][:index], m.regions.Map[regionID][index+1:]...)
+	}
 	if len(m.regions.Map[regionID]) == 0 {
 		delete(m.regions.Map, regionID)
 	}
